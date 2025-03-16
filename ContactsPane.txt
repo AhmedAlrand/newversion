@@ -1,0 +1,641 @@
+package com.example.financial;
+
+import javafx.scene.control.*;
+import javafx.scene.control.cell.PropertyValueFactory;
+import javafx.scene.layout.*;
+import javafx.stage.Stage;
+import javafx.scene.Scene;
+import javafx.beans.property.SimpleStringProperty;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.text.DecimalFormat;
+import java.util.*;
+
+public class ContactsPane extends VBox {
+    private static final Logger LOGGER = LoggerFactory.getLogger(ContactsPane.class);
+    private ResourceBundle messages;
+    private final DatabaseService dbService;
+    private final AuditService auditService;
+    private final ExchangeRateService exchangeRateService;
+    private ComboBox<String> contactTypeCombo;
+    private TextField searchField;
+    private ListView<String> contactList;
+    private TableView<Map<String, String>> activityTable;
+    private Label weOweLabel;
+    private Label owesUsLabel;
+    private Label totalBalanceLabel;
+    private ComboBox<String> balanceCurrencyCombo;
+    private TextField usdToIqdField; // New: Editable USD to IQD rate
+    private TextField usdToRmbField; // New: Editable USD to RMB rate
+    private Button addCustomerButton, addSupplierButton, markPaymentButton;
+    private Label contactTypeLabel, searchLabel, contactsLabel, activityLabel;
+
+    public ContactsPane(ResourceBundle messages, DatabaseService dbService, AuditService auditService, ExchangeRateService exchangeRateService) {
+        this.messages = messages;
+        this.dbService = dbService;
+        this.auditService = auditService;
+        this.exchangeRateService = exchangeRateService;
+        initializeUI();
+    }
+
+    @SuppressWarnings("unchecked")
+    private void initializeUI() {
+        setSpacing(10);
+        setPadding(new javafx.geometry.Insets(10));
+
+        VBox content = new VBox(10);
+
+        contactTypeLabel = new Label(messages.getString("contactType"));
+        content.getChildren().add(contactTypeLabel);
+        contactTypeCombo = new ComboBox<>();
+        contactTypeCombo.getItems().addAll(messages.getString("customers"), messages.getString("suppliers"));
+        contactTypeCombo.setValue(messages.getString("customers"));
+        contactTypeCombo.setOnAction(e -> loadContacts());
+        content.getChildren().add(contactTypeCombo);
+
+        searchLabel = new Label(messages.getString("searchContact"));
+        content.getChildren().add(searchLabel);
+        searchField = new TextField();
+        searchField.setPromptText(messages.getString("typeToSearch"));
+        searchField.textProperty().addListener((obs, oldVal, newVal) -> searchContacts(newVal));
+        content.getChildren().add(searchField);
+
+        contactsLabel = new Label(messages.getString("contacts"));
+        content.getChildren().add(contactsLabel);
+        contactList = new ListView<>();
+        contactList.setPrefHeight(200);
+        contactList.getSelectionModel().selectedItemProperty().addListener((obs, oldVal, newVal) -> loadActivity());
+        content.getChildren().add(contactList);
+
+        activityLabel = new Label(messages.getString("activityInvoicesPayments"));
+        content.getChildren().add(activityLabel);
+        activityTable = new TableView<>();
+        TableColumn<Map<String, String>, String> typeCol = new TableColumn<>(messages.getString("type"));
+        typeCol.setCellValueFactory(cellData -> new SimpleStringProperty(cellData.getValue().get("type")));
+        TableColumn<Map<String, String>, String> idCol = new TableColumn<>(messages.getString("id"));
+        idCol.setCellValueFactory(cellData -> new SimpleStringProperty(cellData.getValue().get("id")));
+        TableColumn<Map<String, String>, String> dateCol = new TableColumn<>(messages.getString("date"));
+        dateCol.setCellValueFactory(cellData -> new SimpleStringProperty(cellData.getValue().get("date")));
+        TableColumn<Map<String, String>, String> amountCol = new TableColumn<>(messages.getString("amount"));
+        amountCol.setCellValueFactory(cellData -> new SimpleStringProperty(cellData.getValue().get("amount")));
+        TableColumn<Map<String, String>, String> currencyCol = new TableColumn<>(messages.getString("currency"));
+        currencyCol.setCellValueFactory(cellData -> new SimpleStringProperty(cellData.getValue().get("currency")));
+        TableColumn<Map<String, String>, String> statusCol = new TableColumn<>(messages.getString("status"));
+        statusCol.setCellValueFactory(cellData -> new SimpleStringProperty(cellData.getValue().get("status")));
+        activityTable.getColumns().addAll((TableColumn<Map<String, String>, ?>[]) new TableColumn[] {typeCol, idCol, dateCol, amountCol, currencyCol, statusCol});
+        activityTable.setPrefHeight(200);
+        activityTable.setOnMouseClicked(e -> {
+            if (e.getClickCount() == 2) {
+                Map<String, String> selected = activityTable.getSelectionModel().getSelectedItem();
+                if (selected != null) {
+                    showActivityDetails(selected);
+                }
+            }
+        });
+        content.getChildren().add(activityTable);
+
+        HBox balanceBox = new HBox(10);
+        weOweLabel = new Label(messages.getString("weOwe") + ": $0.00");
+        owesUsLabel = new Label(messages.getString("owesUs") + ": $0.00");
+        balanceBox.getChildren().addAll(weOweLabel, owesUsLabel);
+        content.getChildren().add(balanceBox);
+
+        HBox totalBalanceBox = new HBox(10);
+        Label currencyLabel = new Label(messages.getString("displayCurrency"));
+        balanceCurrencyCombo = new ComboBox<>();
+        balanceCurrencyCombo.getItems().addAll("USD", "IQD", "RMB");
+        balanceCurrencyCombo.setValue("USD");
+        balanceCurrencyCombo.setOnAction(e -> loadActivity());
+        totalBalanceLabel = new Label(messages.getString("totalBalance") + ": $0.00");
+        totalBalanceBox.getChildren().addAll(currencyLabel, balanceCurrencyCombo, totalBalanceLabel);
+        content.getChildren().add(totalBalanceBox);
+
+        // Add Exchange Rate Fields
+        HBox exchangeRateBox = new HBox(10);
+        Label usdToIqdLabel = new Label("USD to IQD Rate:");
+        usdToIqdField = new TextField("1250.0"); // Default value
+        usdToIqdField.setPrefWidth(80);
+        usdToIqdField.textProperty().addListener((obs, oldVal, newVal) -> loadActivity());
+        Label usdToRmbLabel = new Label("USD to RMB Rate:");
+        usdToRmbField = new TextField("7.0"); // Default value
+        usdToRmbField.setPrefWidth(80);
+        usdToRmbField.textProperty().addListener((obs, oldVal, newVal) -> loadActivity());
+        exchangeRateBox.getChildren().addAll(usdToIqdLabel, usdToIqdField, usdToRmbLabel, usdToRmbField);
+        content.getChildren().add(exchangeRateBox);
+
+        HBox buttonBox = new HBox(10);
+        addCustomerButton = new Button(messages.getString("addCustomer"));
+        addCustomerButton.setOnAction(e -> addNewCustomer());
+        addSupplierButton = new Button(messages.getString("addSupplier"));
+        addSupplierButton.setOnAction(e -> addNewSupplier());
+        markPaymentButton = new Button(messages.getString("markPayment"));
+        markPaymentButton.setOnAction(e -> markPaymentForContact());
+        buttonBox.getChildren().addAll(addCustomerButton, addSupplierButton, markPaymentButton);
+        content.getChildren().add(buttonBox);
+
+        getChildren().add(content);
+
+        loadContacts();
+    }
+
+    private void loadContacts() {
+        contactList.getItems().clear();
+        try {
+            if (contactTypeCombo.getValue().equals(messages.getString("customers"))) {
+                List<String> customers = dbService.getCustomersWithNames();
+                LOGGER.info("Loaded {} customers", customers.size());
+                contactList.getItems().addAll(customers);
+            } else {
+                List<String> suppliers = dbService.getSuppliersWithNames();
+                LOGGER.info("Loaded {} suppliers", suppliers.size());
+                contactList.getItems().addAll(suppliers);
+            }
+            if (!contactList.getItems().isEmpty()) {
+                contactList.getSelectionModel().select(0);
+            }
+        } catch (DatabaseException e) {
+            LOGGER.error("Failed to load contacts", e);
+            new Alert(Alert.AlertType.ERROR, messages.getString("failedToLoadContacts") + ": " + e.getMessage()).showAndWait();
+        }
+    }
+
+    public void searchContacts(String query) {
+        contactList.getItems().clear();
+        try {
+            List<String> customers = dbService.getCustomersWithNames();
+            List<String> suppliers = dbService.getSuppliersWithNames();
+            List<String> allContacts = contactTypeCombo.getValue().equals(messages.getString("customers")) ? customers : suppliers;
+            if (query == null || query.trim().isEmpty()) {
+                LOGGER.info("No query provided, loading all {} contacts: {}", contactTypeCombo.getValue(), allContacts.size());
+                contactList.getItems().addAll(allContacts);
+            } else {
+                List<String> filtered = allContacts.stream()
+                    .filter(name -> name.toLowerCase().contains(query.toLowerCase()))
+                    .toList();
+                LOGGER.info("Filtered {} contacts to {} with query '{}'", contactTypeCombo.getValue(), filtered.size(), query);
+                contactList.getItems().addAll(filtered);
+            }
+            if (!contactList.getItems().isEmpty()) {
+                contactList.getSelectionModel().select(0);
+            }
+        } catch (DatabaseException e) {
+            LOGGER.error("Failed to search contacts", e);
+            new Alert(Alert.AlertType.ERROR, messages.getString("failedToLoadContacts") + ": " + e.getMessage()).showAndWait();
+        }
+    }
+
+    public void loadActivity() {
+        String selectedContact = contactList.getSelectionModel().getSelectedItem();
+        if (selectedContact == null) {
+            LOGGER.info("No contact selected for activity load");
+            weOweLabel.setText(messages.getString("weOwe") + ": $0.00");
+            owesUsLabel.setText(messages.getString("owesUs") + ": $0.00");
+            totalBalanceLabel.setText(messages.getString("totalBalance") + ": $0.00");
+            weOweLabel.setStyle("-fx-text-fill: black;");
+            owesUsLabel.setStyle("-fx-text-fill: black;");
+            totalBalanceLabel.setStyle("-fx-text-fill: black;");
+            activityTable.getItems().clear();
+            return;
+        }
+
+        int contactId;
+        try {
+            contactId = Integer.parseInt(selectedContact.split(" - ")[0]);
+        } catch (NumberFormatException e) {
+            LOGGER.error("Invalid contact ID format: {}", selectedContact);
+            new Alert(Alert.AlertType.ERROR, messages.getString("invalidContactId")).showAndWait();
+            return;
+        }
+
+        activityTable.getItems().clear();
+        try {
+            List<Map<String, String>> activity;
+            Map<String, Double> invoiceTotals;
+            List<Map<String, String>> payments;
+            String contactType = contactTypeCombo.getValue();
+            String displayCurrency = balanceCurrencyCombo.getValue();
+            DecimalFormat df = new DecimalFormat("#,##0.00");
+
+            // Get user-editable exchange rates
+            double usdToIqd;
+            double usdToRmb;
+            try {
+                usdToIqd = Double.parseDouble(usdToIqdField.getText().trim());
+                usdToRmb = Double.parseDouble(usdToRmbField.getText().trim());
+                if (usdToIqd <= 0 || usdToRmb <= 0) {
+                    throw new NumberFormatException("Exchange rates must be positive");
+                }
+            } catch (NumberFormatException e) {
+                LOGGER.error("Invalid exchange rate input: USD to IQD={}, USD to RMB={}", usdToIqdField.getText(), usdToRmbField.getText(), e);
+                new Alert(Alert.AlertType.ERROR, messages.getString("invalidExchangeRate")).showAndWait();
+                return;
+            }
+            double iqdToUsd = 1 / usdToIqd;
+            double rmbToUsd = 1 / usdToRmb;
+
+            if (contactType.equals(messages.getString("customers"))) {
+                activity = dbService.getCustomerActivity(contactId);
+                invoiceTotals = dbService.getCustomerInvoiceTotal(contactId);
+                payments = dbService.getCustomerPayments(contactId);
+                LOGGER.info("Loaded {} activities for contact ID {} as {}", activity.size(), contactId, contactType);
+
+                if (activity.isEmpty()) {
+                    activityTable.setPlaceholder(new Label(messages.getString("noActivityFound")));
+                } else {
+                    activityTable.getItems().addAll(activity);
+                }
+
+                Map<String, Double> paymentTotals = new HashMap<>();
+                for (Map<String, String> payment : payments) {
+                    String currency = payment.get("currency");
+                    double amount = Double.parseDouble(payment.get("amount"));
+                    paymentTotals.merge(currency, amount, Double::sum);
+                }
+
+                StringBuilder weOweText = new StringBuilder(messages.getString("weOwe") + ": ");
+                StringBuilder owesUsText = new StringBuilder(messages.getString("owesUs") + ": ");
+                List<String> weOweParts = new ArrayList<>();
+                List<String> owesUsParts = new ArrayList<>();
+
+                double usdInvoices = invoiceTotals.getOrDefault("USD", 0.0);
+                double usdPayments = paymentTotals.getOrDefault("USD", 0.0);
+                double usdNet = usdInvoices - usdPayments;
+                if (usdNet > 0) {
+                    owesUsParts.add("$" + df.format(usdNet) + " USD");
+                } else if (usdNet < 0) {
+                    weOweParts.add("$" + df.format(-usdNet) + " USD");
+                }
+
+                double iqdInvoices = invoiceTotals.getOrDefault("IQD", 0.0);
+                double iqdPayments = paymentTotals.getOrDefault("IQD", 0.0);
+                double iqdNet = iqdInvoices - iqdPayments;
+                if (iqdNet > 0) {
+                    owesUsParts.add(df.format(iqdNet) + " IQD");
+                } else if (iqdNet < 0) {
+                    weOweParts.add(df.format(-iqdNet) + " IQD");
+                }
+
+                double rmbInvoices = invoiceTotals.getOrDefault("RMB", 0.0);
+                double rmbPayments = paymentTotals.getOrDefault("RMB", 0.0);
+                double rmbNet = rmbInvoices - rmbPayments;
+                if (rmbNet > 0) {
+                    owesUsParts.add(df.format(rmbNet) + " RMB");
+                } else if (rmbNet < 0) {
+                    weOweParts.add(df.format(-rmbNet) + " RMB");
+                }
+
+                weOweText.append(weOweParts.isEmpty() ? "$0.00" : String.join(", ", weOweParts));
+                owesUsText.append(owesUsParts.isEmpty() ? "$0.00" : String.join(", ", owesUsParts));
+                weOweLabel.setText(weOweText.toString());
+                owesUsLabel.setText(owesUsText.toString());
+
+                double totalInUsd = usdNet + (iqdNet * iqdToUsd) + (rmbNet * rmbToUsd);
+                double totalBalance;
+                String totalBalanceText;
+                switch (displayCurrency) {
+                    case "USD":
+                        totalBalance = totalInUsd;
+                        totalBalanceText = messages.getString("totalBalance") + ": $" + df.format(Math.abs(totalBalance)) + " USD";
+                        break;
+                    case "IQD":
+                        totalBalance = totalInUsd * usdToIqd;
+                        totalBalanceText = messages.getString("totalBalance") + ": " + df.format(Math.abs(totalBalance)) + " IQD";
+                        break;
+                    case "RMB":
+                        totalBalance = totalInUsd * usdToRmb;
+                        totalBalanceText = messages.getString("totalBalance") + ": " + df.format(Math.abs(totalBalance)) + " RMB";
+                        break;
+                    default:
+                        totalBalance = totalInUsd;
+                        totalBalanceText = messages.getString("totalBalance") + ": $" + df.format(Math.abs(totalBalance)) + " USD";
+                }
+                totalBalanceLabel.setText(totalBalanceText);
+                totalBalanceLabel.setStyle(totalBalance > 0 ? "-fx-text-fill: green;" : totalBalance < 0 ? "-fx-text-fill: red;" : "-fx-text-fill: black;");
+                LOGGER.info("Total Balance for contact ID {} as {}: {}", contactId, contactType, totalBalanceText);
+
+                weOweLabel.setStyle(usdNet < 0 || iqdNet < 0 || rmbNet < 0 ? "-fx-text-fill: red;" : "-fx-text-fill: black;");
+                owesUsLabel.setStyle(usdNet > 0 || iqdNet > 0 || rmbNet > 0 ? "-fx-text-fill: green;" : "-fx-text-fill: black;");
+                LOGGER.info("Contact ID {} balance as {}: {} {}", contactId, contactType, weOweText, owesUsText);
+            } else { // Suppliers
+                activity = dbService.getSupplierActivity(contactId);
+                invoiceTotals = dbService.getSupplierInvoiceTotal(contactId);
+                payments = dbService.getSupplierPayments(contactId);
+                LOGGER.info("Loaded {} activities for contact ID {} as {}", activity.size(), contactId, contactType);
+
+                if (activity.isEmpty()) {
+                    activityTable.setPlaceholder(new Label(messages.getString("noActivityFound")));
+                } else {
+                    activityTable.getItems().addAll(activity);
+                }
+
+                Map<String, Double> paymentTotals = new HashMap<>();
+                for (Map<String, String> payment : payments) {
+                    String currency = payment.get("currency");
+                    double amount = Double.parseDouble(payment.get("amount"));
+                    paymentTotals.merge(currency, amount, Double::sum);
+                }
+
+                StringBuilder weOweText = new StringBuilder(messages.getString("weOwe") + ": ");
+                StringBuilder owesUsText = new StringBuilder(messages.getString("owesUs") + ": ");
+                List<String> weOweParts = new ArrayList<>();
+                List<String> owesUsParts = new ArrayList<>();
+
+                double usdInvoices = invoiceTotals.getOrDefault("USD", 0.0);
+                double usdPayments = paymentTotals.getOrDefault("USD", 0.0);
+                double usdNet = usdInvoices - usdPayments;
+                if (usdNet > 0) {
+                    weOweParts.add("$" + df.format(usdNet) + " USD");
+                } else if (usdNet < 0) {
+                    owesUsParts.add("$" + df.format(-usdNet) + " USD");
+                }
+
+                double iqdInvoices = invoiceTotals.getOrDefault("IQD", 0.0);
+                double iqdPayments = paymentTotals.getOrDefault("IQD", 0.0);
+                double iqdNet = iqdInvoices - iqdPayments;
+                if (iqdNet > 0) {
+                    weOweParts.add(df.format(iqdNet) + " IQD");
+                } else if (iqdNet < 0) {
+                    owesUsParts.add(df.format(-iqdNet) + " IQD");
+                }
+
+                double rmbInvoices = invoiceTotals.getOrDefault("RMB", 0.0);
+                double rmbPayments = paymentTotals.getOrDefault("RMB", 0.0);
+                double rmbNet = rmbInvoices - rmbPayments;
+                if (rmbNet > 0) {
+                    weOweParts.add(df.format(rmbNet) + " RMB");
+                } else if (rmbNet < 0) {
+                    owesUsParts.add(df.format(-rmbNet) + " RMB");
+                }
+
+                weOweText.append(weOweParts.isEmpty() ? "$0.00" : String.join(", ", weOweParts));
+                owesUsText.append(owesUsParts.isEmpty() ? "$0.00" : String.join(", ", owesUsParts));
+                weOweLabel.setText(weOweText.toString());
+                owesUsLabel.setText(owesUsText.toString());
+
+                double totalInUsd = usdNet + (iqdNet * iqdToUsd) + (rmbNet * rmbToUsd);
+                double totalBalance;
+                String totalBalanceText;
+                switch (displayCurrency) {
+                    case "USD":
+                        totalBalance = totalInUsd;
+                        totalBalanceText = messages.getString("totalBalance") + ": $" + df.format(Math.abs(totalBalance)) + " USD";
+                        break;
+                    case "IQD":
+                        totalBalance = totalInUsd * usdToIqd;
+                        totalBalanceText = messages.getString("totalBalance") + ": " + df.format(Math.abs(totalBalance)) + " IQD";
+                        break;
+                    case "RMB":
+                        totalBalance = totalInUsd * usdToRmb;
+                        totalBalanceText = messages.getString("totalBalance") + ": " + df.format(Math.abs(totalBalance)) + " RMB";
+                        break;
+                    default:
+                        totalBalance = totalInUsd;
+                        totalBalanceText = messages.getString("totalBalance") + ": $" + df.format(Math.abs(totalBalance)) + " USD";
+                }
+                totalBalanceLabel.setText(totalBalanceText);
+                totalBalanceLabel.setStyle(totalBalance > 0 ? "-fx-text-fill: red;" : totalBalance < 0 ? "-fx-text-fill: green;" : "-fx-text-fill: black;");
+                LOGGER.info("Total Balance for contact ID {} as {}: {}", contactId, contactType, totalBalanceText);
+
+                weOweLabel.setStyle(usdNet > 0 || iqdNet > 0 || rmbNet > 0 ? "-fx-text-fill: red;" : "-fx-text-fill: black;");
+                owesUsLabel.setStyle(usdNet < 0 || iqdNet < 0 || rmbNet < 0 ? "-fx-text-fill: green;" : "-fx-text-fill: black;");
+                LOGGER.info("Contact ID {} balance as {}: {} {}", contactId, contactType, weOweText, owesUsText);
+            }
+        } catch (DatabaseException e) {
+            LOGGER.error("Failed to load activity for contact ID: {} as {}", contactId, contactTypeCombo.getValue(), e);
+            new Alert(Alert.AlertType.ERROR, messages.getString("failedToLoadActivity") + ": " + e.getMessage()).showAndWait();
+        }
+    }
+
+    public void refreshLanguage(ResourceBundle newMessages) {
+        LOGGER.info("Refreshing ContactsPane language to bundle: {}", newMessages.getLocale());
+        this.messages = newMessages;
+        contactTypeLabel.setText(messages.getString("contactType"));
+        
+        String currentValue = contactTypeCombo.getValue();
+        LOGGER.info("Current contactTypeCombo value before refresh: {}", currentValue);
+        
+        contactTypeCombo.getItems().clear();
+        contactTypeCombo.getItems().addAll(messages.getString("customers"), messages.getString("suppliers"));
+        
+        if (currentValue != null && currentValue.equals(messages.getString("customers"))) {
+            contactTypeCombo.setValue(messages.getString("customers"));
+        } else if (currentValue != null && currentValue.equals(messages.getString("suppliers"))) {
+            contactTypeCombo.setValue(messages.getString("suppliers"));
+        } else {
+            contactTypeCombo.setValue(messages.getString("customers"));
+        }
+        LOGGER.info("Set contactTypeCombo value after refresh: {}", contactTypeCombo.getValue());
+        
+        searchLabel.setText(messages.getString("searchContact"));
+        searchField.setPromptText(messages.getString("typeToSearch"));
+        contactsLabel.setText(messages.getString("contacts"));
+        activityLabel.setText(messages.getString("activityInvoicesPayments"));
+        activityTable.getColumns().get(0).setText(messages.getString("type"));
+        activityTable.getColumns().get(1).setText(messages.getString("id"));
+        activityTable.getColumns().get(2).setText(messages.getString("date"));
+        activityTable.getColumns().get(3).setText(messages.getString("amount"));
+        activityTable.getColumns().get(4).setText(messages.getString("currency"));
+        activityTable.getColumns().get(5).setText(messages.getString("status"));
+        weOweLabel.setText(messages.getString("weOwe") + ": " + weOweLabel.getText().split(":")[1].trim());
+        owesUsLabel.setText(messages.getString("owesUs") + ": " + owesUsLabel.getText().split(":")[1].trim());
+        totalBalanceLabel.setText(messages.getString("totalBalance") + ": " + totalBalanceLabel.getText().split(":")[1].trim());
+        balanceCurrencyCombo.getItems().clear();
+        balanceCurrencyCombo.getItems().addAll("USD", "IQD", "RMB");
+        addCustomerButton.setText(messages.getString("addCustomer"));
+        addSupplierButton.setText(messages.getString("addSupplier"));
+        markPaymentButton.setText(messages.getString("markPayment"));
+    }
+
+    public ListView<String> getContactList() {
+        return contactList;
+    }
+
+    private void addNewCustomer() {
+        Dialog<Map<String, String>> dialog = new Dialog<>();
+        dialog.setTitle(messages.getString("addNewCustomer"));
+        dialog.setHeaderText(messages.getString("enterCustomerDetails"));
+
+        GridPane grid = new GridPane();
+        grid.setHgap(10);
+        grid.setVgap(10);
+
+        TextField nameField = new TextField();
+        TextField contactField = new TextField();
+        grid.add(new Label(messages.getString("name")), 0, 0);
+        grid.add(nameField, 1, 0);
+        grid.add(new Label(messages.getString("contactInfo")), 0, 1);
+        grid.add(contactField, 1, 1);
+
+        dialog.getDialogPane().setContent(grid);
+        dialog.getDialogPane().getButtonTypes().addAll(ButtonType.OK, ButtonType.CANCEL);
+
+        dialog.setResultConverter(dialogButton -> {
+            if (dialogButton == ButtonType.OK) {
+                Map<String, String> result = new HashMap<>();
+                result.put("name", nameField.getText());
+                result.put("contactInfo", contactField.getText());
+                return result;
+            }
+            return null;
+        });
+
+        Optional<Map<String, String>> result = dialog.showAndWait();
+        result.ifPresent(data -> {
+            try {
+                dbService.addCustomer(data.get("name"), data.get("contactInfo"));
+                auditService.logAction("user", "contacts", null, "Added customer: " + data.get("name"), null, null);
+                loadContacts();
+                new Alert(Alert.AlertType.INFORMATION, messages.getString("customerAdded") + ": " + data.get("name")).showAndWait();
+            } catch (DatabaseException e) {
+                LOGGER.error("Failed to add customer", e);
+                new Alert(Alert.AlertType.ERROR, messages.getString("failedToAddCustomer") + ": " + e.getMessage()).showAndWait();
+            }
+        });
+    }
+
+    private void addNewSupplier() {
+        Dialog<Map<String, String>> dialog = new Dialog<>();
+        dialog.setTitle(messages.getString("addNewSupplier"));
+        dialog.setHeaderText(messages.getString("enterSupplierDetails"));
+
+        GridPane grid = new GridPane();
+        grid.setHgap(10);
+        grid.setVgap(10);
+
+        TextField nameField = new TextField();
+        TextField contactField = new TextField();
+        grid.add(new Label(messages.getString("name")), 0, 0);
+        grid.add(nameField, 1, 0);
+        grid.add(new Label(messages.getString("contactInfo")), 0, 1);
+        grid.add(contactField, 1, 1);
+
+        dialog.getDialogPane().setContent(grid);
+        dialog.getDialogPane().getButtonTypes().addAll(ButtonType.OK, ButtonType.CANCEL);
+
+        dialog.setResultConverter(dialogButton -> {
+            if (dialogButton == ButtonType.OK) {
+                Map<String, String> result = new HashMap<>();
+                result.put("name", nameField.getText());
+                result.put("contactInfo", contactField.getText());
+                return result;
+            }
+            return null;
+        });
+
+        Optional<Map<String, String>> result = dialog.showAndWait();
+        result.ifPresent(data -> {
+            try {
+                dbService.addSupplier(data.get("name"), data.get("contactInfo"));
+                auditService.logAction("user", "contacts", null, "Added supplier: " + data.get("name"), null, null);
+                loadContacts();
+                new Alert(Alert.AlertType.INFORMATION, messages.getString("supplierAdded") + ": " + data.get("name")).showAndWait();
+            } catch (DatabaseException e) {
+                LOGGER.error("Failed to add supplier", e);
+                new Alert(Alert.AlertType.ERROR, messages.getString("failedToAddSupplier") + ": " + e.getMessage()).showAndWait();
+            }
+        });
+    }
+
+    @SuppressWarnings("unchecked")
+    private void showActivityDetails(Map<String, String> activity) {
+        String type = activity.get("type");
+        String id = activity.get("id").trim();
+
+        LOGGER.info("Showing details for type: '{}', id: '{}'", type, id);
+        Stage detailsStage = new Stage();
+        detailsStage.setTitle(type + " " + messages.getString("details") + ": " + id);
+        VBox detailsContent = new VBox(10);
+        detailsContent.setPadding(new javafx.geometry.Insets(10));
+
+        try {
+            if (type.equals("Invoice") || type.equals("Import Purchase") || type.equals("Sale")) {
+                List<InvoiceDetails> invoices = dbService.searchInvoices("invoiceId = ?", Collections.singletonList(id));
+                if (!invoices.isEmpty()) {
+                    InvoiceDetails invoice = invoices.get(0);
+                    detailsContent.getChildren().addAll(
+                        new Label(messages.getString("invoiceId") + ": " + invoice.getInvoiceId()),
+                        new Label(invoice.getInvoiceType().equals("Import Purchase") ?
+                                  messages.getString("supplier") + ": " + invoice.getSupplierName() :
+                                  messages.getString("customer") + ": " + invoice.getCustomerName()),
+                        new Label(messages.getString("date") + ": " + invoice.getDate()),
+                        new Label(messages.getString("type") + ": " + invoice.getInvoiceType()),
+                        new Label(messages.getString("totalAmount") + ": " + invoice.getTotalAmount() + " " + invoice.getCurrency()),
+                        new Label(messages.getString("status") + ": " + invoice.getStatus()),
+                        new Label(messages.getString("paymentInstructions") + ": " + (invoice.getPaymentInstructions() != null ? invoice.getPaymentInstructions() : messages.getString("na"))),
+                        new Label(messages.getString("notes") + ": " + (invoice.getNotes() != null ? invoice.getNotes() : messages.getString("na")))
+                    );
+                    if (invoice.getInvoiceType().equals("Import Purchase")) {
+                        detailsContent.getChildren().addAll(
+                            new Label(messages.getString("shippingCharge") + ": " + invoice.getShippingCharge()),
+                            new Label(messages.getString("transportingFee") + ": " + invoice.getTransportingFee()),
+                            new Label(messages.getString("uploadingFee") + ": " + invoice.getUploadingFee()),
+                            new Label(messages.getString("taxFee") + ": " + invoice.getTaxFee())
+                        );
+                    }
+                    TableView<InvoiceLineItem> itemsTable = new TableView<>();
+                    TableColumn<InvoiceLineItem, Integer> productCol = new TableColumn<>(messages.getString("productId"));
+                    productCol.setCellValueFactory(new PropertyValueFactory<>("productId"));
+                    TableColumn<InvoiceLineItem, Double> qtyCol = new TableColumn<>(messages.getString("quantity"));
+                    qtyCol.setCellValueFactory(new PropertyValueFactory<>("quantity"));
+                    TableColumn<InvoiceLineItem, String> unitCol = new TableColumn<>(messages.getString("unit"));
+                    unitCol.setCellValueFactory(new PropertyValueFactory<>("unit"));
+                    TableColumn<InvoiceLineItem, Double> origPriceCol = new TableColumn<>(messages.getString("originalUnitPrice"));
+                    origPriceCol.setCellValueFactory(new PropertyValueFactory<>("originalUnitPrice"));
+                    TableColumn<InvoiceLineItem, Double> adjPriceCol = new TableColumn<>(messages.getString("adjustedUnitPrice"));
+                    adjPriceCol.setCellValueFactory(new PropertyValueFactory<>("unitPrice"));
+                    TableColumn<InvoiceLineItem, Double> totalCol = new TableColumn<>(messages.getString("totalPrice"));
+                    totalCol.setCellValueFactory(new PropertyValueFactory<>("totalPrice"));
+                    itemsTable.getColumns().addAll((TableColumn<InvoiceLineItem, ?>[]) new TableColumn[] {productCol, qtyCol, unitCol, origPriceCol, adjPriceCol, totalCol});
+                    itemsTable.getItems().addAll(invoice.getLineItems());
+                    itemsTable.setPrefHeight(200);
+                    detailsContent.getChildren().add(itemsTable);
+                } else {
+                    LOGGER.warn("No invoice found for ID: '{}'", id);
+                    detailsContent.getChildren().add(new Label(messages.getString("noDetailsFoundForInvoice") + ": " + id));
+                }
+            } else if (type.equals("Payment")) {
+                detailsContent.getChildren().addAll(
+                    new Label(messages.getString("paymentId") + ": " + id),
+                    new Label(messages.getString("date") + ": " + activity.get("date")),
+                    new Label(messages.getString("amount") + ": " + activity.get("amount")),
+                    new Label(messages.getString("currency") + ": " + activity.get("currency")),
+                    new Label(messages.getString("status") + ": " + activity.get("status"))
+                );
+            }
+        } catch (DatabaseException e) {
+            LOGGER.error("Failed to load details for {}: {}", id, e.getMessage());
+            detailsContent.getChildren().add(new Label(messages.getString("errorLoadingDetails") + ": " + e.getMessage()));
+        }
+
+        Scene scene = new Scene(detailsContent, 600, 400);
+        detailsStage.setScene(scene);
+        detailsStage.show();
+    }
+
+    private void markPaymentForContact() {
+        String selectedContact = contactList.getSelectionModel().getSelectedItem();
+        if (selectedContact == null) {
+            new Alert(Alert.AlertType.WARNING, messages.getString("pleaseSelectContact")).showAndWait();
+            return;
+        }
+
+        int contactId;
+        try {
+            contactId = Integer.parseInt(selectedContact.split(" - ")[0]);
+        } catch (NumberFormatException e) {
+            LOGGER.error("Invalid contact ID format: {}", selectedContact);
+            new Alert(Alert.AlertType.ERROR, messages.getString("invalidContactId")).showAndWait();
+            return;
+        }
+
+        Stage stage = (Stage) getScene().getWindow();
+        FinancialManagementApp app = (FinancialManagementApp) stage.getUserData();
+        if (app != null) {
+            app.markPaymentReceived();
+        } else {
+            LOGGER.error("Failed to get FinancialManagementApp instance for marking payment");
+            new Alert(Alert.AlertType.ERROR, "Application instance not found").showAndWait();
+        }
+    }
+}

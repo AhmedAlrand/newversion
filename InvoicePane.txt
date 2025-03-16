@@ -1,0 +1,1447 @@
+package com.example.financial;
+
+import javafx.scene.control.*;
+import javafx.scene.control.cell.PropertyValueFactory;
+import javafx.scene.layout.*;
+import javafx.stage.FileChooser;
+import javafx.stage.Stage;
+import javafx.scene.Scene;
+import java.io.File;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import javafx.application.Platform;
+import java.time.LocalDate;
+import java.util.*;
+import java.util.stream.Collectors;
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import com.itextpdf.kernel.pdf.PdfDocument;
+import com.itextpdf.kernel.pdf.PdfWriter;
+import com.itextpdf.layout.Document;
+import com.itextpdf.layout.element.Paragraph;
+import java.nio.file.Files;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import com.example.financial.DatabaseService.Product;
+import javafx.animation.ScaleTransition;
+import javafx.animation.Timeline;
+import javafx.animation.KeyFrame;
+import javafx.animation.KeyValue;
+import javafx.scene.paint.Color;
+import javafx.util.Duration;
+import javafx.geometry.Insets;
+import javafx.geometry.Pos;
+import javafx.print.PrinterJob;
+import java.util.Optional;
+import java.awt.Desktop;
+import java.io.File;
+import java.io.FileOutputStream;
+import java.io.IOException;
+
+public class InvoicePane extends VBox {
+    private static final Logger LOGGER = LoggerFactory.getLogger(InvoicePane.class);
+    private ResourceBundle messages;
+    private final DatabaseService dbService;
+    private final AuditService auditService;
+    private final ExchangeRateService exchangeRateService;
+    private Label invoiceIdLabel;
+    private TextField customerField, supplierField, productField;
+    private TextField totalAmountField, invoiceExchangeRateField, itemExchangeRateField;
+    private ComboBox<String> invoiceTypeCombo, currencyCombo, paymentTermCombo;
+    private Label invoiceRateLabel, itemRateLabel;
+    private TextField paymentInstructionsField, notesField;
+    private DatePicker datePicker;
+    private TableView<InvoiceLineItem> lineItemsTable;
+    private ComboBox<Integer> warehouseIdCombo;
+    private TextField quantityField, unitPriceField, discountField;
+    private ComboBox<String> itemCurrencyCombo, unitCombo;
+    private Button addItemButton, deleteItemButton, editItemButton, saveButton, editInvoiceButton, deleteInvoiceButton, printButton, exportButton, attachmentButton, viewAttachmentsButton;
+    private TextField shippingFeeField, transportingFeeField, uploadingFeeField, taxFeeField;
+    private ComboBox<String> shippingFeeCurrencyCombo, transportingFeeCurrencyCombo, uploadingFeeCurrencyCombo, taxFeeCurrencyCombo;
+    private TextField shippingFeeExchangeRateField, transportingFeeExchangeRateField, uploadingFeeExchangeRateField, taxFeeExchangeRateField;
+    private String currentInvoiceId;
+    private Label invoiceTypeLabel, customerLabel, supplierLabel, dateLabel, totalAmountLabel, invoiceCurrencyLabel, paymentInstructionsLabel, paymentTermLabel, notesLabel;
+    private Label shippingFeeLabel, transportingFeeLabel, uploadingFeeLabel, taxFeeLabel;
+    private Label productLabel, warehouseIdLabel, quantityLabel, unitLabel, unitPriceLabel, discountLabel, itemCurrencyLabel;
+    private TableColumn<InvoiceLineItem, Integer> productIdCol, warehouseIdCol, quantityCol;
+    private TableColumn<InvoiceLineItem, String> unitCol, currencyCol;
+    private TableColumn<InvoiceLineItem, Double> originalPriceCol, unitPriceCol, discountCol, totalPriceCol;
+    private Button newInvoiceButton;
+    private GridPane feeGrid;
+
+    public InvoicePane(ResourceBundle messages, DatabaseService dbService, AuditService auditService, ExchangeRateService exchangeRateService, boolean isNewWindow) {
+        this.messages = messages;
+        this.dbService = dbService;
+        this.auditService = auditService;
+        this.exchangeRateService = exchangeRateService;
+        this.currentInvoiceId = null;
+        initializeUI();
+        resetInvoice();
+    }
+
+    @SuppressWarnings("unchecked")
+    private void initializeUI() {
+        setSpacing(10);
+        setPadding(new Insets(10));
+
+        // Polished header at top
+        HBox headerBox = new HBox(20);
+        headerBox.setPadding(new Insets(10));
+        headerBox.setStyle("-fx-background-color: linear-gradient(to bottom, #0288D1, #0277BD); " +
+                           "-fx-background-radius: 5; " +
+                           "-fx-effect: dropshadow(gaussian, rgba(0,0,0,0.3), 5, 0, 0, 2);");
+
+        invoiceIdLabel = new Label(messages.getString("invoiceId") + ": Not yet saved");
+        invoiceIdLabel.setStyle("-fx-text-fill: white; -fx-font-weight: bold;");
+        HBox.setMargin(invoiceIdLabel, new Insets(0, 0, 0, 10));
+
+        invoiceTypeLabel = new Label(messages.getString("invoiceType"));
+        invoiceTypeLabel.setStyle("-fx-text-fill: white; -fx-font-weight: bold;");
+        invoiceTypeCombo = new ComboBox<>();
+        invoiceTypeCombo.getItems().addAll("Sale", "Purchase", "Import Purchase", "Credit Note");
+        invoiceTypeCombo.setValue("Sale");
+        invoiceTypeCombo.setStyle("-fx-background-radius: 5;");
+        invoiceTypeCombo.setOnAction(e -> toggleFields());
+
+        customerField = new TextField();
+        customerField.setPromptText("Type to search (e.g., Cust)");
+        customerField.textProperty().addListener((obs, oldVal, newVal) -> suggestCustomers(newVal));
+        try {
+            List<String> customers = dbService.getCustomersWithNames();
+            if (!customers.isEmpty()) customerField.setText(customers.get(0));
+        } catch (DatabaseException e) {
+            LOGGER.error("Failed to load initial customer", e);
+        }
+        customerField.setStyle("-fx-background-radius: 5;");
+        customerField.visibleProperty().bind(invoiceTypeCombo.valueProperty().isEqualTo("Sale").or(invoiceTypeCombo.valueProperty().isEqualTo("Credit Note")));
+        HBox.setMargin(customerField, new Insets(0, 10, 0, 0));
+
+        headerBox.getChildren().addAll(invoiceIdLabel, invoiceTypeLabel, invoiceTypeCombo, customerField);
+        headerBox.setAlignment(Pos.CENTER_LEFT);
+
+        // ScrollPane for fields
+        ScrollPane scrollPane = new ScrollPane();
+        VBox content = new VBox(10);
+        scrollPane.setContent(content);
+        scrollPane.setFitToWidth(true);
+        scrollPane.setPrefHeight(500);
+
+        supplierLabel = new Label(messages.getString("supplier"));
+        content.getChildren().add(supplierLabel);
+        supplierField = new TextField();
+        supplierField.setPromptText("Type to search (e.g., Supp)");
+        supplierField.textProperty().addListener((obs, oldVal, newVal) -> suggestSuppliers(newVal));
+        try {
+            List<String> suppliers = dbService.getSuppliersWithNames();
+            if (!suppliers.isEmpty()) supplierField.setText(suppliers.get(0));
+        } catch (DatabaseException e) {
+            LOGGER.error("Failed to load initial supplier", e);
+        }
+        supplierField.visibleProperty().bind(invoiceTypeCombo.valueProperty().isEqualTo("Import Purchase").or(invoiceTypeCombo.valueProperty().isEqualTo("Purchase")));
+        content.getChildren().add(supplierField);
+
+        dateLabel = new Label(messages.getString("date"));
+        content.getChildren().add(dateLabel);
+        datePicker = new DatePicker(LocalDate.now());
+        content.getChildren().add(datePicker);
+
+        totalAmountLabel = new Label(messages.getString("totalAmount"));
+        content.getChildren().add(totalAmountLabel);
+        totalAmountField = new TextField();
+        totalAmountField.setEditable(false);
+        content.getChildren().add(totalAmountField);
+
+        HBox invoiceCurrencyBox = new HBox(10);
+        invoiceCurrencyLabel = new Label(messages.getString("currency"));
+        invoiceCurrencyBox.getChildren().add(invoiceCurrencyLabel);
+        currencyCombo = new ComboBox<>();
+        currencyCombo.getItems().addAll("USD", "IQD", "RMB");
+        currencyCombo.setValue("USD");
+        currencyCombo.setOnAction(e -> updateTotalAmount());
+        invoiceCurrencyBox.getChildren().add(currencyCombo);
+
+        invoiceRateLabel = new Label(messages.getString("exchangeRate"));
+        invoiceRateLabel.visibleProperty().bind(currencyCombo.valueProperty().isNotEqualTo("USD"));
+        invoiceExchangeRateField = new TextField("1.0");
+        invoiceExchangeRateField.visibleProperty().bind(currencyCombo.valueProperty().isNotEqualTo("USD"));
+        invoiceExchangeRateField.textProperty().addListener((obs, oldVal, newVal) -> updateTotalAmount());
+        invoiceCurrencyBox.getChildren().addAll(invoiceRateLabel, invoiceExchangeRateField);
+        content.getChildren().add(invoiceCurrencyBox);
+
+        paymentInstructionsLabel = new Label(messages.getString("paymentInstructions"));
+        content.getChildren().add(paymentInstructionsLabel);
+        paymentInstructionsField = new TextField("Pay by check");
+        content.getChildren().add(paymentInstructionsField);
+
+        paymentTermLabel = new Label(messages.getString("paymentTerm"));
+        content.getChildren().add(paymentTermLabel);
+        paymentTermCombo = new ComboBox<>();
+        paymentTermCombo.getItems().addAll("Net 15", "Net 30", "Net 60");
+        paymentTermCombo.setValue("Net 30");
+        content.getChildren().add(paymentTermCombo);
+
+        notesLabel = new Label(messages.getString("notes"));
+        content.getChildren().add(notesLabel);
+        notesField = new TextField();
+        content.getChildren().add(notesField);
+
+        feeGrid = new GridPane();
+        feeGrid.setHgap(10);
+        feeGrid.setVgap(5);
+        feeGrid.setVisible(false);
+
+        shippingFeeLabel = new Label(messages.getString("shippingCharge"));
+        feeGrid.add(shippingFeeLabel, 0, 0);
+        shippingFeeField = new TextField("0.0");
+        shippingFeeField.textProperty().addListener((obs, oldVal, newVal) -> updateTotalAmount());
+        feeGrid.add(shippingFeeField, 1, 0);
+        shippingFeeCurrencyCombo = new ComboBox<>();
+        shippingFeeCurrencyCombo.getItems().addAll("USD", "IQD", "RMB");
+        shippingFeeCurrencyCombo.setValue("USD");
+        shippingFeeCurrencyCombo.setOnAction(e -> updateTotalAmount());
+        feeGrid.add(shippingFeeCurrencyCombo, 2, 0);
+        shippingFeeExchangeRateField = new TextField("1.0");
+        shippingFeeExchangeRateField.visibleProperty().bind(shippingFeeCurrencyCombo.valueProperty().isNotEqualTo("USD"));
+        shippingFeeExchangeRateField.textProperty().addListener((obs, oldVal, newVal) -> updateTotalAmount());
+        feeGrid.add(shippingFeeExchangeRateField, 3, 0);
+
+        transportingFeeLabel = new Label(messages.getString("transportingFee"));
+        feeGrid.add(transportingFeeLabel, 0, 1);
+        transportingFeeField = new TextField("0.0");
+        transportingFeeField.textProperty().addListener((obs, oldVal, newVal) -> updateTotalAmount());
+        feeGrid.add(transportingFeeField, 1, 1);
+        transportingFeeCurrencyCombo = new ComboBox<>();
+        transportingFeeCurrencyCombo.getItems().addAll("USD", "IQD", "RMB");
+        transportingFeeCurrencyCombo.setValue("USD");
+        transportingFeeCurrencyCombo.setOnAction(e -> updateTotalAmount());
+        feeGrid.add(transportingFeeCurrencyCombo, 2, 1);
+        transportingFeeExchangeRateField = new TextField("1.0");
+        transportingFeeExchangeRateField.visibleProperty().bind(transportingFeeCurrencyCombo.valueProperty().isNotEqualTo("USD"));
+        transportingFeeExchangeRateField.textProperty().addListener((obs, oldVal, newVal) -> updateTotalAmount());
+        feeGrid.add(transportingFeeExchangeRateField, 3, 1);
+
+        uploadingFeeLabel = new Label(messages.getString("uploadingFee"));
+        feeGrid.add(uploadingFeeLabel, 0, 2);
+        uploadingFeeField = new TextField("0.0");
+        uploadingFeeField.textProperty().addListener((obs, oldVal, newVal) -> updateTotalAmount());
+        feeGrid.add(uploadingFeeField, 1, 2);
+        uploadingFeeCurrencyCombo = new ComboBox<>();
+        uploadingFeeCurrencyCombo.getItems().addAll("USD", "IQD", "RMB");
+        uploadingFeeCurrencyCombo.setValue("USD");
+        uploadingFeeCurrencyCombo.setOnAction(e -> updateTotalAmount());
+        feeGrid.add(uploadingFeeCurrencyCombo, 2, 2);
+        uploadingFeeExchangeRateField = new TextField("1.0");
+        uploadingFeeExchangeRateField.visibleProperty().bind(uploadingFeeCurrencyCombo.valueProperty().isNotEqualTo("USD"));
+        uploadingFeeExchangeRateField.textProperty().addListener((obs, oldVal, newVal) -> updateTotalAmount());
+        feeGrid.add(uploadingFeeExchangeRateField, 3, 2);
+
+        taxFeeLabel = new Label(messages.getString("taxFee"));
+        feeGrid.add(taxFeeLabel, 0, 3);
+        taxFeeField = new TextField("0.0");
+        taxFeeField.textProperty().addListener((obs, oldVal, newVal) -> updateTotalAmount());
+        feeGrid.add(taxFeeField, 1, 3);
+        taxFeeCurrencyCombo = new ComboBox<>();
+        taxFeeCurrencyCombo.getItems().addAll("USD", "IQD", "RMB");
+        taxFeeCurrencyCombo.setValue("USD");
+        taxFeeCurrencyCombo.setOnAction(e -> updateTotalAmount());
+        feeGrid.add(taxFeeCurrencyCombo, 2, 3);
+        taxFeeExchangeRateField = new TextField("1.0");
+        taxFeeExchangeRateField.visibleProperty().bind(taxFeeCurrencyCombo.valueProperty().isNotEqualTo("USD"));
+        taxFeeExchangeRateField.textProperty().addListener((obs, oldVal, newVal) -> updateTotalAmount());
+        feeGrid.add(taxFeeExchangeRateField, 3, 3);
+
+        content.getChildren().add(feeGrid);
+
+        lineItemsTable = new TableView<>();
+        productIdCol = new TableColumn<>(messages.getString("productId"));
+        productIdCol.setCellValueFactory(new PropertyValueFactory<>("productId"));
+        warehouseIdCol = new TableColumn<>(messages.getString("warehouseId"));
+        warehouseIdCol.setCellValueFactory(new PropertyValueFactory<>("warehouseId"));
+        quantityCol = new TableColumn<>(messages.getString("quantity"));
+        quantityCol.setCellValueFactory(new PropertyValueFactory<>("quantity"));
+        unitCol = new TableColumn<>(messages.getString("unit"));
+        unitCol.setCellValueFactory(new PropertyValueFactory<>("unit"));
+        originalPriceCol = new TableColumn<>(messages.getString("originalUnitPrice"));
+        originalPriceCol.setCellValueFactory(new PropertyValueFactory<>("originalUnitPrice"));
+        unitPriceCol = new TableColumn<>(messages.getString("adjustedUnitPrice"));
+        unitPriceCol.setCellValueFactory(new PropertyValueFactory<>("unitPrice"));
+        discountCol = new TableColumn<>(messages.getString("discount"));
+        discountCol.setCellValueFactory(new PropertyValueFactory<>("discount"));
+        totalPriceCol = new TableColumn<>(messages.getString("totalPrice"));
+        totalPriceCol.setCellValueFactory(new PropertyValueFactory<>("totalPrice"));
+        currencyCol = new TableColumn<>(messages.getString("currency"));
+        currencyCol.setCellValueFactory(new PropertyValueFactory<>("currency"));
+        lineItemsTable.getColumns().addAll((TableColumn<InvoiceLineItem, ?>[]) new TableColumn[] {productIdCol, warehouseIdCol, quantityCol, unitCol, originalPriceCol, unitPriceCol, discountCol, totalPriceCol, currencyCol});
+        content.getChildren().add(lineItemsTable);
+
+        GridPane itemInput = new GridPane();
+        itemInput.setHgap(10);
+        itemInput.setVgap(5);
+
+        productLabel = new Label(messages.getString("product"));
+        itemInput.add(productLabel, 0, 0);
+        productField = new TextField();
+        productField.setPromptText("Type to search (e.g., Prod)");
+        productField.textProperty().addListener((obs, oldVal, newVal) -> suggestProducts(newVal));
+        itemInput.add(productField, 1, 0);
+
+        warehouseIdLabel = new Label(messages.getString("warehouseId"));
+        itemInput.add(warehouseIdLabel, 0, 1);
+        warehouseIdCombo = new ComboBox<>();
+        warehouseIdCombo.getItems().add(1);
+        warehouseIdCombo.setValue(1);
+        itemInput.add(warehouseIdCombo, 1, 1);
+
+        quantityLabel = new Label(messages.getString("quantity"));
+        itemInput.add(quantityLabel, 0, 2);
+        quantityField = new TextField("1");
+        itemInput.add(quantityField, 1, 2);
+
+        unitLabel = new Label(messages.getString("unit"));
+        itemInput.add(unitLabel, 0, 3);
+        unitCombo = new ComboBox<>();
+        unitCombo.setPromptText("Select Product first");
+        itemInput.add(unitCombo, 1, 3);
+
+        unitPriceLabel = new Label(messages.getString("unitPrice"));
+        itemInput.add(unitPriceLabel, 0, 4);
+        unitPriceField = new TextField("100.0");
+        itemInput.add(unitPriceField, 1, 4);
+
+        discountLabel = new Label(messages.getString("discount"));
+        itemInput.add(discountLabel, 0, 5);
+        discountField = new TextField("0.0");
+        itemInput.add(discountField, 1, 5);
+
+        HBox itemCurrencyBox = new HBox(10);
+        itemCurrencyLabel = new Label(messages.getString("currency"));
+        itemCurrencyBox.getChildren().add(itemCurrencyLabel);
+        itemCurrencyCombo = new ComboBox<>();
+        itemCurrencyCombo.getItems().addAll("USD", "IQD", "RMB");
+        itemCurrencyCombo.setValue("USD");
+        itemCurrencyBox.getChildren().add(itemCurrencyCombo);
+
+        itemRateLabel = new Label(messages.getString("exchangeRate"));
+        itemRateLabel.visibleProperty().bind(itemCurrencyCombo.valueProperty().isNotEqualTo("USD"));
+        itemExchangeRateField = new TextField("1.0");
+        itemExchangeRateField.visibleProperty().bind(itemCurrencyCombo.valueProperty().isNotEqualTo("USD"));
+        itemExchangeRateField.textProperty().addListener((obs, oldVal, newVal) -> updateTotalAmount());
+        itemCurrencyBox.getChildren().addAll(itemRateLabel, itemExchangeRateField);
+        itemInput.add(itemCurrencyBox, 1, 6);
+
+        HBox itemButtons = new HBox(10);
+        addItemButton = new Button(messages.getString("addLineItem"));
+        addItemButton.setStyle("-fx-background-color: linear-gradient(to bottom, #4CAF50, #45a049); -fx-text-fill: white; " +
+                               "-fx-font-weight: bold; -fx-padding: 8 16; -fx-background-radius: 5; " +
+                               "-fx-effect: dropshadow(gaussian, rgba(0,0,0,0.3), 5, 0, 0, 2);");
+        addItemButton.setOnAction(e -> {
+            applyClickEffect(addItemButton, "#4CAF50");
+            addLineItem();
+        });
+
+        deleteItemButton = new Button(messages.getString("deleteItem"));
+        deleteItemButton.setStyle("-fx-background-color: linear-gradient(to bottom, #F44336, #d32f2f); -fx-text-fill: white; " +
+                                  "-fx-font-weight: bold; -fx-padding: 8 16; -fx-background-radius: 5; " +
+                                  "-fx-effect: dropshadow(gaussian, rgba(0,0,0,0.3), 5, 0, 0, 2);");
+        deleteItemButton.setOnAction(e -> {
+            applyClickEffect(deleteItemButton, "#F44336");
+            deleteLineItem();
+        });
+
+        editItemButton = new Button(messages.getString("editItem"));
+        editItemButton.setStyle("-fx-background-color: linear-gradient(to bottom, #FF9800, #e68a00); -fx-text-fill: white; " +
+                                "-fx-font-weight: bold; -fx-padding: 8 16; -fx-background-radius: 5; " +
+                                "-fx-effect: dropshadow(gaussian, rgba(0,0,0,0.3), 5, 0, 0, 2);");
+        editItemButton.setOnAction(e -> {
+            applyClickEffect(editItemButton, "#FF9800");
+            editLineItem();
+        });
+
+        itemButtons.getChildren().addAll(addItemButton, deleteItemButton, editItemButton);
+        itemInput.add(itemButtons, 1, 7);
+
+        content.getChildren().add(itemInput);
+
+        // Styled invoice buttons (at bottom)
+        HBox invoiceButtons = new HBox(10);
+        invoiceButtons.setAlignment(Pos.CENTER);
+        invoiceButtons.setPadding(new Insets(10, 0, 0, 0));
+
+        newInvoiceButton = new Button(messages.getString("newInvoice"));
+        newInvoiceButton.setStyle("-fx-background-color: linear-gradient(to bottom, #2196F3, #1e87d9); -fx-text-fill: white; " +
+                                  "-fx-font-weight: bold; -fx-padding: 8 16; -fx-background-radius: 5; " +
+                                  "-fx-effect: dropshadow(gaussian, rgba(0,0,0,0.3), 5, 0, 0, 2);");
+        newInvoiceButton.setOnAction(e -> {
+            applyClickEffect(newInvoiceButton, "#2196F3");
+            resetInvoice();
+        });
+
+        saveButton = new Button(messages.getString("save"));
+        saveButton.setStyle("-fx-background-color: linear-gradient(to bottom, #4CAF50, #45a049); -fx-text-fill: white; " +
+                            "-fx-font-weight: bold; -fx-padding: 8 16; -fx-background-radius: 5; " +
+                            "-fx-effect: dropshadow(gaussian, rgba(0,0,0,0.3), 5, 0, 0, 2);");
+        saveButton.setOnAction(e -> {
+            applyClickEffect(saveButton, "#4CAF50");
+            saveInvoice();
+        });
+
+        editInvoiceButton = new Button(messages.getString("browseInvoices"));
+        editInvoiceButton.setStyle("-fx-background-color: linear-gradient(to bottom, #FF9800, #e68a00); -fx-text-fill: white; " +
+                                   "-fx-font-weight: bold; -fx-padding: 8 16; -fx-background-radius: 5; " +
+                                   "-fx-effect: dropshadow(gaussian, rgba(0,0,0,0.3), 5, 0, 0, 2);");
+        editInvoiceButton.setOnAction(e -> {
+            applyClickEffect(editInvoiceButton, "#FF9800");
+            browseInvoices();
+        });
+
+        deleteInvoiceButton = new Button(messages.getString("deleteInvoice"));
+        deleteInvoiceButton.setStyle("-fx-background-color: linear-gradient(to bottom, #F44336, #d32f2f); -fx-text-fill: white; " +
+                                     "-fx-font-weight: bold; -fx-padding: 8 16; -fx-background-radius: 5; " +
+                                     "-fx-effect: dropshadow(gaussian, rgba(0,0,0,0.3), 5, 0, 0, 2);");
+        deleteInvoiceButton.setOnAction(e -> {
+            applyClickEffect(deleteInvoiceButton, "#F44336");
+            deleteInvoice();
+        });
+
+        printButton = new Button(messages.getString("print"));
+        printButton.setStyle("-fx-background-color: linear-gradient(to bottom, #9C27B0, #8e24aa); -fx-text-fill: white; " +
+                             "-fx-font-weight: bold; -fx-padding: 8 16; -fx-background-radius: 5; " +
+                             "-fx-effect: dropshadow(gaussian, rgba(0,0,0,0.3), 5, 0, 0, 2);");
+        printButton.setOnAction(e -> {
+            applyClickEffect(printButton, "#9C27B0");
+            printInvoice();
+        });
+
+        exportButton = new Button(messages.getString("exportToPdf"));
+        exportButton.setStyle("-fx-background-color: linear-gradient(to bottom, #009688, #00796b); -fx-text-fill: white; " +
+                              "-fx-font-weight: bold; -fx-padding: 8 16; -fx-background-radius: 5; " +
+                              "-fx-effect: dropshadow(gaussian, rgba(0,0,0,0.3), 5, 0, 0, 2);");
+        exportButton.setOnAction(e -> {
+            applyClickEffect(exportButton, "#009688");
+            exportInvoice();
+        });
+
+        attachmentButton = new Button(messages.getString("addAttachment") + " (0)");
+        attachmentButton.setStyle("-fx-background-color: linear-gradient(to bottom, #3F51B5, #3949ab); -fx-text-fill: white; " +
+                                  "-fx-font-weight: bold; -fx-padding: 8 16; -fx-background-radius: 5; " +
+                                  "-fx-effect: dropshadow(gaussian, rgba(0,0,0,0.3), 5, 0, 0, 2);");
+        attachmentButton.setOnAction(e -> {
+            applyClickEffect(attachmentButton, "#3F51B5");
+            addAttachment();
+        });
+
+        viewAttachmentsButton = new Button(messages.getString("viewAttachment"));
+        viewAttachmentsButton.setStyle("-fx-background-color: linear-gradient(to bottom, #607D8B, #546e7a); -fx-text-fill: white; " +
+                                       "-fx-font-weight: bold; -fx-padding: 8 16; -fx-background-radius: 5; " +
+                                       "-fx-effect: dropshadow(gaussian, rgba(0,0,0,0.3), 5, 0, 0, 2);");
+        viewAttachmentsButton.setOnAction(e -> {
+            applyClickEffect(viewAttachmentsButton, "#607D8B");
+            viewAttachments();
+        });
+
+        invoiceButtons.getChildren().addAll(newInvoiceButton, saveButton, editInvoiceButton, deleteInvoiceButton, printButton, exportButton, attachmentButton, viewAttachmentsButton);
+
+        getChildren().addAll(headerBox, scrollPane, invoiceButtons);
+        VBox.setVgrow(scrollPane, Priority.ALWAYS);
+        setPrefHeight(700);
+        setPrefWidth(900);
+        toggleFields();
+    }
+
+    private void applyClickEffect(Button button, String originalColor) {
+        ScaleTransition scale = new ScaleTransition(Duration.millis(100), button);
+        scale.setToX(0.95);
+        scale.setToY(0.95);
+        scale.setCycleCount(2);
+        scale.setAutoReverse(true);
+        scale.play();
+
+        Timeline colorFlash = new Timeline(
+            new KeyFrame(Duration.ZERO, new KeyValue(button.backgroundProperty(), 
+                new Background(new BackgroundFill(Color.LIGHTGRAY, CornerRadii.EMPTY, Insets.EMPTY)))),
+            new KeyFrame(Duration.millis(100), new KeyValue(button.backgroundProperty(), 
+                new Background(new BackgroundFill(Color.valueOf(originalColor), CornerRadii.EMPTY, Insets.EMPTY))))
+        );
+        colorFlash.setCycleCount(2);
+        colorFlash.setAutoReverse(true);
+        colorFlash.play();
+    }
+
+    private void resetInvoice() {
+        currentInvoiceId = null;
+        invoiceIdLabel.setText(messages.getString("invoiceId") + ": Not yet saved");
+        invoiceTypeCombo.setValue("Sale");
+        customerField.clear();
+        supplierField.clear();
+        datePicker.setValue(LocalDate.now());
+        totalAmountField.clear();
+        currencyCombo.setValue("USD");
+        invoiceExchangeRateField.setText("1.0");
+        paymentInstructionsField.setText("Pay by check");
+        paymentTermCombo.setValue("Net 30");
+        notesField.clear();
+        shippingFeeField.setText("0.0");
+        transportingFeeField.setText("0.0");
+        uploadingFeeField.setText("0.0");
+        taxFeeField.setText("0.0");
+        shippingFeeCurrencyCombo.setValue("USD");
+        transportingFeeCurrencyCombo.setValue("USD");
+        uploadingFeeCurrencyCombo.setValue("USD");
+        taxFeeCurrencyCombo.setValue("USD");
+        shippingFeeExchangeRateField.setText("1.0");
+        transportingFeeExchangeRateField.setText("1.0");
+        uploadingFeeExchangeRateField.setText("1.0");
+        taxFeeExchangeRateField.setText("1.0");
+        productField.clear();
+        warehouseIdCombo.setValue(1);
+        quantityField.setText("1");
+        unitCombo.getItems().clear();
+        unitCombo.setPromptText(messages.getString("selectProductFirst"));
+        unitPriceField.setText("100.0");
+        discountField.setText("0.0");
+        itemCurrencyCombo.setValue("USD");
+        itemExchangeRateField.setText("1.0");
+        lineItemsTable.getItems().clear();
+        updateAttachmentButton();
+        toggleFields();
+    }
+
+    private void saveInvoice() {
+        try {
+            Integer customerId = null;
+            String customerText = customerField.getText().trim();
+            if (!customerText.isEmpty()) {
+                if (!isValidIdNameFormat(customerText)) {
+                    LOGGER.warn("Invalid customer format: '{}'. Please select from suggestions (e.g., '1 - ahmed')", customerText);
+                    new Alert(Alert.AlertType.ERROR, "Invalid customer format. Please select a customer from the suggestions (e.g., '1 - ahmed')").showAndWait();
+                    return;
+                }
+                try {
+                    customerId = Integer.parseInt(customerText.split(" - ")[0]);
+                } catch (NumberFormatException | ArrayIndexOutOfBoundsException e) {
+                    LOGGER.error("Failed to parse customer ID from: '{}'", customerText, e);
+                    new Alert(Alert.AlertType.ERROR, "Failed to parse customer ID. Use format 'ID - Name' (e.g., '1 - ahmed')").showAndWait();
+                    return;
+                }
+            }
+
+            Integer supplierId = null;
+            String supplierText = supplierField.getText().trim();
+            if (!supplierText.isEmpty()) {
+                if (!isValidIdNameFormat(supplierText)) {
+                    LOGGER.warn("Invalid supplier format: '{}'. Please select from suggestions (e.g., '1 - ali')", supplierText);
+                    new Alert(Alert.AlertType.ERROR, "Invalid supplier format. Please select a supplier from the suggestions (e.g., '1 - ali')").showAndWait();
+                    return;
+                }
+                try {
+                    supplierId = Integer.parseInt(supplierText.split(" - ")[0]);
+                } catch (NumberFormatException | ArrayIndexOutOfBoundsException e) {
+                    LOGGER.error("Failed to parse supplier ID from: '{}'", supplierText, e);
+                    new Alert(Alert.AlertType.ERROR, "Failed to parse supplier ID. Use format 'ID - Name' (e.g., '1 - ali')").showAndWait();
+                    return;
+                }
+            }
+
+            String invoiceType = invoiceTypeCombo.getValue();
+            String date = datePicker.getValue().toString();
+            double totalAmount;
+            try {
+                totalAmount = Double.parseDouble(totalAmountField.getText());
+            } catch (NumberFormatException e) {
+                LOGGER.warn("Invalid total amount: {}", totalAmountField.getText(), e);
+                new Alert(Alert.AlertType.ERROR, getStringOrDefault("invalidTotalAmount", "Invalid total amount")).showAndWait();
+                return;
+            }
+            if (totalAmount <= 0) {
+                new Alert(Alert.AlertType.ERROR, getStringOrDefault("invalidTotalAmount", "Total amount must be greater than zero")).showAndWait();
+                return;
+            }
+
+            double taxAmount = 0.0;
+            String currency = currencyCombo.getValue();
+            List<InvoiceLineItem> lineItems = new ArrayList<>(lineItemsTable.getItems());
+            String paymentInstructions = paymentInstructionsField.getText();
+            String paymentTerm = paymentTermCombo.getValue();
+            String status = "OPEN";
+            String notes = notesField.getText();
+            double exchangeRate = Double.parseDouble(invoiceExchangeRateField.getText());
+            double shippingFee = Double.parseDouble(shippingFeeField.getText());
+            double transportingFee = Double.parseDouble(transportingFeeField.getText());
+            double uploadingFee = Double.parseDouble(uploadingFeeField.getText());
+            double taxFee = Double.parseDouble(taxFeeField.getText());
+
+            if (lineItems.isEmpty()) {
+                LOGGER.warn("No line items to save for invoice");
+                new Alert(Alert.AlertType.WARNING, "Cannot save invoice without line items").showAndWait();
+                return;
+            }
+
+            if (currentInvoiceId != null) {
+                dbService.updateInvoice(currentInvoiceId, customerId, supplierId, invoiceType, date, totalAmount, taxAmount, currency,
+                    lineItems, status, paymentInstructions, paymentTerm, notes, exchangeRate, shippingFee, transportingFee, uploadingFee, taxFee);
+                LOGGER.info("Invoice updated with ID: {}", currentInvoiceId);
+            } else {
+                LOGGER.info("Saving new invoice with {} line items", lineItems.size());
+                currentInvoiceId = dbService.saveInvoice(customerId, supplierId, invoiceType, date, totalAmount, taxAmount, currency,
+                    lineItems, status, paymentInstructions, paymentTerm, notes, exchangeRate, shippingFee, transportingFee, uploadingFee, taxFee);
+                LOGGER.info("Invoice saved with new ID: {}", currentInvoiceId);
+            }
+
+            for (InvoiceLineItem item : lineItems) {
+                String unit = item.getUnit() != null ? item.getUnit() : "Box";
+                LOGGER.info("Updating inventory for item: ProductID={}, Qty={}, Unit={}, TransactionType={}",
+                    item.getProductId(), item.getQuantity(), unit, invoiceType);
+                try {
+                    dbService.addInventoryItem(
+                        item.getProductId(), item.getWarehouseId(), item.getQuantity(), unit,
+                        customerId != null ? customerId : (supplierId != null ? supplierId : 0),
+                        customerId != null ? customerField.getText() : supplierField.getText(),
+                        invoiceType
+                    );
+                } catch (DatabaseException e) {
+                    LOGGER.warn("Inventory update failed for ProductID: {}: {}", item.getProductId(), e.getMessage());
+                }
+            }
+
+            if (invoiceType.equals("Import Purchase")) {
+                double totalFeesInUSD = getTotalFees();
+                double totalItemsAmount = lineItems.stream()
+                    .mapToDouble(item -> item.getOriginalUnitPrice() * item.getQuantity())
+                    .sum();
+                double factor = totalItemsAmount > 0 ? totalFeesInUSD / totalItemsAmount : 0;
+                LOGGER.info("Total Fees: {}, Total Items Amount: {}, Factor: {}", totalFeesInUSD, totalItemsAmount, factor);
+                List<InvoiceLineItem> updatedItems = new ArrayList<>();
+                for (InvoiceLineItem item : lineItems) {
+                    double originalPrice = item.getOriginalUnitPrice();
+                    double newUnitPrice = originalPrice + (factor * originalPrice);
+                    item.setUnitPrice(newUnitPrice);
+                    item.setTotalPrice(newUnitPrice * item.getQuantity());
+                    updatedItems.add(item);
+                    LOGGER.info("Item {}: Original Price: {}, New Unit Price: {}, New Total: {}", 
+                        item.getProductId(), originalPrice, newUnitPrice, item.getTotalPrice());
+                }
+                dbService.updateInvoiceLineItems(currentInvoiceId, updatedItems);
+                lineItemsTable.getItems().clear();
+                lineItemsTable.getItems().addAll(updatedItems);
+                lineItemsTable.refresh();
+                updateTotalAmount();
+            }
+
+            Platform.runLater(() -> {
+                invoiceIdLabel.setText(messages.getString("invoiceId") + ": " + currentInvoiceId);
+                new Alert(Alert.AlertType.INFORMATION, getStringOrDefault("invoiceSaved", "Invoice saved successfully")).showAndWait();
+            });
+
+            String contactName = customerId != null ? customerField.getText() : supplierField.getText();
+            if (contactName != null && !contactName.isEmpty()) {
+                FinancialManagementApp app = (FinancialManagementApp) saveButton.getScene().getWindow().getUserData();
+                if (app != null) {
+                    app.refreshContactsPane(contactName);
+                }
+            }
+
+            updateAttachmentButton();
+        } catch (NumberFormatException e) {
+            LOGGER.error("Invalid numeric input in saveInvoice", e);
+            new Alert(Alert.AlertType.ERROR, "Invalid numeric input: " + e.getMessage()).showAndWait();
+        } catch (DatabaseException e) {
+            LOGGER.error("Failed to save/update invoice", e);
+            new Alert(Alert.AlertType.ERROR, getStringOrDefault("failedToSaveInvoice", "Failed to save invoice") + ": " + e.getMessage()).showAndWait();
+        }
+    }
+
+    private boolean isValidIdNameFormat(String input) {
+        if (input == null || input.trim().isEmpty()) return true;
+        return input.matches("\\d+\\s*-\\s*\\w+");
+    }
+
+    private String getStringOrDefault(String key, String defaultValue) {
+        try {
+            return messages.getString(key);
+        } catch (MissingResourceException e) {
+            LOGGER.warn("Missing resource key: {}, using default: {}", key, defaultValue);
+            return defaultValue;
+        }
+    }
+
+    private void toggleFields() {
+        boolean isImportPurchase = invoiceTypeCombo.getValue().equals("Import Purchase");
+        feeGrid.setVisible(isImportPurchase);
+    }
+
+    
+    @SuppressWarnings("unchecked")
+    private void browseInvoices() {
+        try {
+            List<InvoiceDetails> allInvoices = dbService.getAllInvoices();
+            TableView<InvoiceDetails> invoiceTable = new TableView<>();
+            TableColumn<InvoiceDetails, String> idCol = new TableColumn<>(messages.getString("invoiceId"));
+            idCol.setCellValueFactory(new PropertyValueFactory<>("invoiceId"));
+            TableColumn<InvoiceDetails, String> typeCol = new TableColumn<>(messages.getString("invoiceType"));
+            typeCol.setCellValueFactory(new PropertyValueFactory<>("invoiceType"));
+            TableColumn<InvoiceDetails, String> customerCol = new TableColumn<>(messages.getString("customer"));
+            customerCol.setCellValueFactory(new PropertyValueFactory<>("customerName"));
+            TableColumn<InvoiceDetails, String> supplierCol = new TableColumn<>(messages.getString("supplier"));
+            supplierCol.setCellValueFactory(new PropertyValueFactory<>("supplierName"));
+            TableColumn<InvoiceDetails, String> dateCol = new TableColumn<>(messages.getString("date"));
+            dateCol.setCellValueFactory(new PropertyValueFactory<>("date"));
+            TableColumn<InvoiceDetails, Double> amountCol = new TableColumn<>(messages.getString("totalAmount"));
+            amountCol.setCellValueFactory(new PropertyValueFactory<>("totalAmount"));
+            invoiceTable.getColumns().addAll((TableColumn<InvoiceDetails, ?>[]) new TableColumn[] {idCol, typeCol, customerCol, supplierCol, dateCol, amountCol});
+
+            // Add date range filter
+            DatePicker fromDatePicker = new DatePicker(LocalDate.now().minusYears(1)); // Default: 1 year ago
+            fromDatePicker.setPromptText("From Date");
+            DatePicker toDatePicker = new DatePicker(LocalDate.now().plusYears(1));   // Default: 1 year ahead
+            toDatePicker.setPromptText("To Date");
+            HBox dateBox = new HBox(10, new Label("From:"), fromDatePicker, new Label("To:"), toDatePicker);
+            dateBox.setAlignment(Pos.CENTER_LEFT);
+
+            // Add search field with supplier name and date filtering
+            TextField searchField = new TextField();
+            searchField.setPromptText("Search by customer, supplier, or product name");
+            searchField.textProperty().addListener((obs, oldVal, newVal) -> {
+                LocalDate fromDate = fromDatePicker.getValue() != null ? fromDatePicker.getValue() : LocalDate.MIN;
+                LocalDate toDate = toDatePicker.getValue() != null ? toDatePicker.getValue() : LocalDate.MAX;
+                List<InvoiceDetails> filteredInvoices = allInvoices.stream()
+                    .filter(invoice -> {
+                        // Date range filter
+                        LocalDate invoiceDate = LocalDate.parse(invoice.getDate());
+                        if (invoiceDate.isBefore(fromDate) || invoiceDate.isAfter(toDate)) {
+                            return false;
+                        }
+                        // Text-based filter
+                        if (newVal == null || newVal.trim().isEmpty()) {
+                            return true;
+                        }
+                        String lowerInput = newVal.toLowerCase();
+                        if (invoice.getInvoiceType().equals("Sale") || invoice.getInvoiceType().equals("Credit Note")) {
+                            String customerName = invoice.getCustomerName() != null ? invoice.getCustomerName().toLowerCase() : "";
+                            if (customerName.contains(lowerInput)) return true;
+                        }
+                        if (invoice.getInvoiceType().equals("Purchase") || invoice.getInvoiceType().equals("Import Purchase")) {
+                            String supplierName = invoice.getSupplierName() != null ? invoice.getSupplierName().toLowerCase() : "";
+                            if (supplierName.contains(lowerInput)) return true;
+                        }
+                        List<InvoiceLineItem> items = invoice.getLineItems();
+                        if (items != null) {
+                            for (InvoiceLineItem item : items) {
+                                String productName = getProductName(item.getProductId()).toLowerCase();
+                                if (productName.contains(lowerInput)) return true;
+                            }
+                        }
+                        return false;
+                    })
+                    .collect(Collectors.toList());
+                invoiceTable.getItems().setAll(filteredInvoices);
+            });
+
+            // Update table when date pickers change
+            Runnable updateTable = () -> searchField.textProperty().setValue(searchField.getText()); // Corrected typo
+            fromDatePicker.valueProperty().addListener((obs, oldVal, newVal) -> updateTable.run());
+            toDatePicker.valueProperty().addListener((obs, oldVal, newVal) -> updateTable.run());
+
+            invoiceTable.getItems().addAll(allInvoices);
+            invoiceTable.setOnMouseClicked(e -> {
+                if (e.getClickCount() == 2) {
+                    InvoiceDetails selected = invoiceTable.getSelectionModel().getSelectedItem();
+                    if (selected != null) {
+                        loadInvoiceForEdit(selected);
+                    }
+                }
+            });
+
+            VBox dialogContent = new VBox(10, dateBox, searchField, invoiceTable);
+            dialogContent.setPadding(new Insets(10));
+
+            Stage browseStage = new Stage();
+            browseStage.setTitle(messages.getString("browseInvoices"));
+            browseStage.setScene(new Scene(dialogContent, 800, 400));
+            browseStage.show();
+        } catch (DatabaseException e) {
+            LOGGER.error("Failed to browse invoices", e);
+            new Alert(Alert.AlertType.ERROR, messages.getString("failedToLoadInvoices") + ": " + e.getMessage()).showAndWait();
+        }
+    }
+
+    private void suggestCustomers(String input) {
+        ContextMenu suggestions = new ContextMenu();
+        if (input == null || input.trim().isEmpty() || customerField.getScene() == null) {
+            suggestions.hide();
+            return;
+        }
+        try {
+            String lowerInput = input.toLowerCase();
+            List<String> customers = dbService.getCustomersWithNames();
+            suggestions.getItems().clear();
+            for (String customer : customers) {
+                if (customer.toLowerCase().contains(lowerInput)) {
+                    MenuItem menuItem = new MenuItem(customer);
+                    menuItem.setOnAction(e -> {
+                        customerField.setText(customer);
+                        suggestions.hide();
+                        customerField.requestFocus();
+                    });
+                    suggestions.getItems().add(menuItem);
+                }
+            }
+            if (!suggestions.getItems().isEmpty()) {
+                suggestions.show(customerField, javafx.geometry.Side.BOTTOM, 0, 0);
+            } else {
+                suggestions.hide();
+            }
+        } catch (DatabaseException e) {
+            LOGGER.error("Failed to fetch customers for suggestion", e);
+            new Alert(Alert.AlertType.ERROR, messages.getString("errorLoadingCustomers") + ": " + e.getMessage()).showAndWait();
+        }
+    }
+    private void suggestSuppliers(String input) {
+        ContextMenu suggestions = new ContextMenu();
+        if (input == null || input.trim().isEmpty()) {
+            suggestions.hide();
+            return;
+        }
+        try {
+            String lowerInput = input.toLowerCase();
+            List<String> suppliers = dbService.getSuppliersWithNames();
+            suggestions.getItems().clear();
+            for (String supplier : suppliers) {
+                if (supplier.toLowerCase().contains(lowerInput)) {
+                    MenuItem menuItem = new MenuItem(supplier);
+                    menuItem.setOnAction(e -> {
+                        supplierField.setText(supplier);
+                        suggestions.hide();
+                        supplierField.requestFocus();
+                    });
+                    suggestions.getItems().add(menuItem);
+                }
+            }
+            if (!suggestions.getItems().isEmpty()) {
+                suggestions.show(supplierField, javafx.geometry.Side.BOTTOM, 0, 0);
+            } else {
+                suggestions.hide();
+            }
+        } catch (DatabaseException e) {
+            LOGGER.error("Failed to fetch suppliers for suggestion", e);
+            new Alert(Alert.AlertType.ERROR, messages.getString("errorLoadingSuppliers") + ": " + e.getMessage()).showAndWait();
+        }
+    }
+
+    private void suggestProducts(String input) {
+        ContextMenu suggestions = new ContextMenu();
+        if (input == null || input.trim().isEmpty()) {
+            suggestions.hide();
+            return;
+        }
+        try {
+            String lowerInput = input.toLowerCase();
+            List<Product> products = dbService.getProducts();
+            suggestions.getItems().clear();
+            for (Product p : products) {
+                String item = p.getId() + " - " + p.getName();
+                if (item.toLowerCase().contains(lowerInput)) {
+                    MenuItem menuItem = new MenuItem(item);
+                    menuItem.setOnAction(e -> {
+                        productField.setText(item);
+                        updateUnitCombo(item);
+                        suggestions.hide();
+                        productField.requestFocus();
+                    });
+                    suggestions.getItems().add(menuItem);
+                }
+            }
+            if (!suggestions.getItems().isEmpty()) {
+                suggestions.show(productField, javafx.geometry.Side.BOTTOM, 0, 0);
+            } else {
+                suggestions.hide();
+            }
+        } catch (DatabaseException e) {
+            LOGGER.error("Failed to fetch products for suggestion", e);
+            new Alert(Alert.AlertType.ERROR, messages.getString("errorLoadingProducts") + ": " + e.getMessage()).showAndWait();
+        }
+    }
+
+    private void addLineItem() {
+        try {
+            String productText = productField.getText();
+            if (productText == null || productText.trim().isEmpty()) {
+                new Alert(Alert.AlertType.WARNING, messages.getString("pleaseSelectProduct")).showAndWait();
+                return;
+            }
+            int productId = Integer.parseInt(productText.split(" - ")[0]);
+            int warehouseId = warehouseIdCombo.getValue() != null ? warehouseIdCombo.getValue() : 1;
+            double quantity = Double.parseDouble(quantityField.getText().isEmpty() ? "1" : quantityField.getText());
+            String unit = unitCombo.getValue() != null ? unitCombo.getValue() : "piece";
+            double unitPrice = Double.parseDouble(unitPriceField.getText().isEmpty() ? "0.0" : unitPriceField.getText());
+            double discount = Double.parseDouble(discountField.getText().isEmpty() ? "0.0" : discountField.getText());
+            String currency = itemCurrencyCombo.getValue() != null ? itemCurrencyCombo.getValue() : "USD";
+            double itemExchangeRate = currency.equals("USD") ? 1.0 : Double.parseDouble(itemExchangeRateField.getText().isEmpty() ? "1.0" : itemExchangeRateField.getText());
+
+            double originalUnitPrice = unitPrice / itemExchangeRate;
+            double adjustedUnitPrice = originalUnitPrice * (1 - discount / 100.0);
+            double totalPrice = quantity * adjustedUnitPrice;
+
+            InvoiceLineItem item = new InvoiceLineItem(
+                0, productId, warehouseId, quantity, unit, originalUnitPrice, totalPrice, 0.0,
+                0.0, discount, 0.0, 0.0, 0.0, "USD"
+            );
+            lineItemsTable.getItems().add(item);
+            updateTotalAmount();
+
+            productField.clear();
+            warehouseIdCombo.setValue(1);
+            quantityField.setText("1");
+            unitCombo.getSelectionModel().clearSelection();
+            unitCombo.setPromptText(messages.getString("selectProductFirst"));
+            unitPriceField.setText("100.0");
+            discountField.setText("0.0");
+            itemCurrencyCombo.setValue("USD");
+        } catch (NumberFormatException ex) {
+            LOGGER.error("Invalid numeric input in addLineItem: ", ex);
+            new Alert(Alert.AlertType.ERROR, messages.getString("invalidNumericInput") + ": " + ex.getMessage()).showAndWait();
+        }
+    }
+
+    private double getTotalFees() {
+        double shipping = shippingFeeField.getText().isEmpty() ? 0 : Double.parseDouble(shippingFeeField.getText());
+        double shippingRate = shippingFeeCurrencyCombo.getValue().equals("USD") ? 1.0 : Double.parseDouble(shippingFeeExchangeRateField.getText());
+        double transporting = transportingFeeField.getText().isEmpty() ? 0 : Double.parseDouble(transportingFeeField.getText());
+        double transportingRate = transportingFeeCurrencyCombo.getValue().equals("USD") ? 1.0 : Double.parseDouble(transportingFeeExchangeRateField.getText());
+        double uploading = uploadingFeeField.getText().isEmpty() ? 0 : Double.parseDouble(uploadingFeeField.getText());
+        double uploadingRate = uploadingFeeCurrencyCombo.getValue().equals("USD") ? 1.0 : Double.parseDouble(uploadingFeeExchangeRateField.getText());
+        double tax = taxFeeField.getText().isEmpty() ? 0 : Double.parseDouble(taxFeeField.getText());
+        double taxRate = taxFeeCurrencyCombo.getValue().equals("USD") ? 1.0 : Double.parseDouble(taxFeeExchangeRateField.getText());
+        return (shipping / shippingRate) + (transporting / transportingRate) + (uploading / uploadingRate) + (tax / taxRate);
+    }
+
+    private void deleteLineItem() {
+        InvoiceLineItem selected = lineItemsTable.getSelectionModel().getSelectedItem();
+        if (selected != null) {
+            lineItemsTable.getItems().remove(selected);
+            updateTotalAmount();
+        } else {
+            new Alert(Alert.AlertType.WARNING, messages.getString("selectItemToDelete")).showAndWait();
+        }
+    }
+
+    private void editLineItem() {
+        InvoiceLineItem selected = lineItemsTable.getSelectionModel().getSelectedItem();
+        if (selected != null) {
+            productField.setText(selected.getProductId() + " - " + getProductName(selected.getProductId()));
+            warehouseIdCombo.setValue(selected.getWarehouseId());
+            quantityField.setText(String.valueOf(selected.getQuantity()));
+            unitCombo.setValue(selected.getUnit());
+            unitPriceField.setText(String.valueOf(selected.getOriginalUnitPrice()));
+            discountField.setText(String.valueOf(selected.getDiscount()));
+            itemCurrencyCombo.setValue(selected.getCurrency());
+            lineItemsTable.getItems().remove(selected);
+            updateTotalAmount();
+        } else {
+            new Alert(Alert.AlertType.WARNING, messages.getString("selectItemToEdit")).showAndWait();
+        }
+    }
+
+    private String getProductName(int productId) {
+        try {
+            List<Product> products = dbService.getProducts();
+            return products.stream()
+                .filter(p -> p.getId() == productId)
+                .findFirst()
+                .map(Product::getName)
+                .orElse(messages.getString("unknown"));
+        } catch (DatabaseException e) {
+            LOGGER.error("Failed to get product name for ID: " + productId, e);
+            return messages.getString("unknown");
+        }
+    }
+
+    private void updateTotalAmount() {
+        try {
+            String invoiceCurrency = currencyCombo.getValue() != null ? currencyCombo.getValue() : "USD";
+            double invoiceRate;
+            try {
+                String rateText = invoiceExchangeRateField.getText().trim();
+                invoiceRate = rateText.isEmpty() ? 1.0 : Double.parseDouble(rateText);
+                if (invoiceRate <= 0) {
+                    throw new NumberFormatException("Exchange rate must be positive");
+                }
+            } catch (NumberFormatException e) {
+                LOGGER.error("Invalid invoice exchange rate input: {}", invoiceExchangeRateField.getText(), e);
+                new Alert(Alert.AlertType.ERROR, messages.getString("invalidExchangeRate")).showAndWait();
+                return;
+            }
+            LOGGER.info("Calculating total for invoice currency: {}, exchange rate: {}", invoiceCurrency, invoiceRate);
+
+            double total = lineItemsTable.getItems().stream()
+                .mapToDouble(item -> {
+                    double itemTotal = item.getTotalPrice();
+                    String itemCurrency = item.getCurrency();
+                    double itemRate;
+                    try {
+                        String itemRateText = itemExchangeRateField.getText().trim();
+                        itemRate = itemRateText.isEmpty() ? 1.0 : Double.parseDouble(itemRateText);
+                        if (itemRate <= 0) {
+                            throw new NumberFormatException("Item exchange rate must be positive");
+                        }
+                    } catch (NumberFormatException e) {
+                        LOGGER.error("Invalid item exchange rate input for ProductID={}: {}", item.getProductId(), itemExchangeRateField.getText(), e);
+                        return 0.0;
+                    }
+                    LOGGER.info("Item: ProductID={}, TotalPrice={}, ItemCurrency={}, ItemRate={}", 
+                                item.getProductId(), itemTotal, itemCurrency, itemRate);
+
+                    double totalInUSD = itemCurrency.equals("USD") ? itemTotal : itemTotal / itemRate;
+                    LOGGER.info("Converted to USD: {}", totalInUSD);
+
+                    double totalInInvoiceCurrency = invoiceCurrency.equals("USD") ? totalInUSD : totalInUSD * invoiceRate;
+                    LOGGER.info("Converted to {}: {}", invoiceCurrency, totalInInvoiceCurrency);
+                    return totalInInvoiceCurrency;
+                })
+                .sum();
+
+            if (invoiceTypeCombo.getValue() != null && invoiceTypeCombo.getValue().equals("Import Purchase")) {
+                double totalFees = getTotalFees();
+                LOGGER.info("Adding Import Purchase fees: {}", totalFees);
+                total += totalFees;
+            }
+
+            LOGGER.info("Final total in {}: {}", invoiceCurrency, total);
+            totalAmountField.setText(String.format("%.2f", total));
+        } catch (Exception e) {
+            LOGGER.error("Unexpected error in updateTotalAmount", e);
+            new Alert(Alert.AlertType.ERROR, messages.getString("invalidNumericInput")).showAndWait();
+        }
+    }
+
+    private void loadInvoiceForEdit(InvoiceDetails invoice) {
+        if (invoice != null) {
+            currentInvoiceId = invoice.getInvoiceId();
+            invoiceIdLabel.setText(messages.getString("invoiceId") + ": " + currentInvoiceId);
+            invoiceTypeCombo.setValue(invoice.getInvoiceType());
+            if (invoice.getInvoiceType().equals("Import Purchase")) {
+                supplierField.setText(invoice.getSupplierName());
+            } else {
+                customerField.setText(invoice.getCustomerName());
+            }
+            datePicker.setValue(LocalDate.parse(invoice.getDate()));
+            totalAmountField.setText(String.format("%.2f", invoice.getTotalAmount()));
+            currencyCombo.setValue(invoice.getCurrency());
+            paymentInstructionsField.setText(invoice.getPaymentInstructions());
+            paymentTermCombo.setValue(invoice.getPaymentTerm());
+            notesField.setText(invoice.getNotes());
+            invoiceExchangeRateField.setText(String.valueOf(invoice.getExchangeRate()));
+            shippingFeeField.setText(String.valueOf(invoice.getShippingCharge()));
+            transportingFeeField.setText(String.valueOf(invoice.getTransportingFee()));
+            uploadingFeeField.setText(String.valueOf(invoice.getUploadingFee()));
+            taxFeeField.setText(String.valueOf(invoice.getTaxFee()));
+            shippingFeeCurrencyCombo.setValue("USD");
+            transportingFeeCurrencyCombo.setValue("USD");
+            uploadingFeeCurrencyCombo.setValue("USD");
+            taxFeeCurrencyCombo.setValue("USD");
+            toggleFields();
+            lineItemsTable.getItems().clear();
+            lineItemsTable.getItems().addAll(invoice.getLineItems());
+            updateTotalAmount();
+            updateAttachmentButton();
+        }
+    }
+
+    private void deleteInvoice() {
+        if (currentInvoiceId != null) {
+            // Pre-deletion confirmation
+            Alert confirm = new Alert(Alert.AlertType.CONFIRMATION);
+            confirm.setTitle("Confirm Deletion");
+            confirm.setHeaderText("Delete Invoice #" + currentInvoiceId);
+            confirm.setContentText("Are you sure you want to delete this invoice?");
+            confirm.getButtonTypes().setAll(ButtonType.YES, ButtonType.NO);
+            
+            Optional<ButtonType> result = confirm.showAndWait();
+            if (result.isPresent() && result.get() == ButtonType.YES) {
+                try {
+                    dbService.deleteInvoice(currentInvoiceId);
+                    // Post-deletion confirmation
+                    Alert success = new Alert(Alert.AlertType.INFORMATION);
+                    success.setTitle("Deletion Successful");
+                    success.setHeaderText(null);
+                    success.setContentText("Invoice #" + currentInvoiceId + " has been successfully deleted.");
+                    success.showAndWait();
+                    resetInvoice();
+                } catch (DatabaseException e) {
+                    new Alert(Alert.AlertType.ERROR, messages.getString("failedToDeleteInvoice")).showAndWait();
+                }
+            }
+        } else {
+            new Alert(Alert.AlertType.WARNING, messages.getString("noInvoiceToDelete")).showAndWait();
+        }
+    }
+//=======
+    private void printInvoice() {
+        if (currentInvoiceId == null) {
+            LOGGER.warn("No invoice selected to print");
+            new Alert(Alert.AlertType.WARNING, messages.getString("noInvoiceToPrint")).showAndWait();
+            return;
+        }
+
+        LOGGER.info("Starting print process for invoice {}", currentInvoiceId);
+
+        // Confirmation dialog before printing
+        Alert confirm = new Alert(Alert.AlertType.CONFIRMATION);
+        confirm.setTitle("Confirm Print");
+        confirm.setHeaderText("Print Invoice #" + currentInvoiceId);
+        confirm.setContentText("Are you sure you want to print this invoice?");
+        confirm.getButtonTypes().setAll(ButtonType.YES, ButtonType.NO);
+        
+        Optional<ButtonType> result = confirm.showAndWait();
+        if (!result.isPresent() || result.get() != ButtonType.YES) {
+            LOGGER.info("Print cancelled by user");
+            return;
+        }
+
+        // Create printable content
+        VBox printContent = new VBox(10);
+        printContent.setPadding(new Insets(10));
+        printContent.getChildren().addAll(
+            new Label("Invoice ID: " + currentInvoiceId),
+            new Label("Contact: " + (invoiceTypeCombo.getValue().equals("Import Purchase") ? supplierField.getText() : customerField.getText())),
+            new Label("Date: " + (datePicker.getValue() != null ? datePicker.getValue().toString() : "N/A")),
+            new Label("Total Amount: " + (totalAmountField.getText() != null ? totalAmountField.getText() : ("0.0") + " " + currencyCombo.getValue()))
+        );
+
+        // Add fees for Import Purchase
+        if (invoiceTypeCombo.getValue().equals("Import Purchase")) {
+            printContent.getChildren().addAll(
+                new Label("Shipping Charge: " + shippingFeeField.getText() + " " + shippingFeeCurrencyCombo.getValue()),
+                new Label("Transporting Fee: " + transportingFeeField.getText() + " " + transportingFeeCurrencyCombo.getValue()),
+                new Label("Uploading Fee: " + uploadingFeeField.getText() + " " + uploadingFeeCurrencyCombo.getValue()),
+                new Label("Tax Fee: " + taxFeeField.getText() + " " + taxFeeCurrencyCombo.getValue())
+            );
+        }
+
+        // Add line items
+        printContent.getChildren().add(new Label("\nLine Items:"));
+        List<InvoiceLineItem> items = lineItemsTable.getItems();
+        if (items.isEmpty()) {
+            printContent.getChildren().add(new Label("No line items available"));
+        } else {
+            for (InvoiceLineItem item : items) {
+                // Use %f for quantity, assuming it’s a Double; adjust all to %f for consistency
+                String lineItemText = String.format("Product %d, %.2f %s, Original $%.2f, Adjusted $%.2f, Subtotal: $%.2f",
+                    item.getProductId(), item.getQuantity(), item.getUnit(),
+                    item.getOriginalUnitPrice(), item.getUnitPrice(), item.getTotalPrice());
+                printContent.getChildren().add(new Label(lineItemText));
+            }
+        }
+
+        // Print the content
+        PrinterJob printerJob = PrinterJob.createPrinterJob();
+        if (printerJob != null && printerJob.showPrintDialog(null)) {
+            LOGGER.debug("Sending invoice {} to printer", currentInvoiceId);
+            boolean success = printerJob.printPage(printContent);
+            if (success) {
+                printerJob.endJob();
+                LOGGER.info("Invoice {} successfully printed", currentInvoiceId);
+                new Alert(Alert.AlertType.INFORMATION, "Invoice #" + currentInvoiceId + " has been sent to the printer.").showAndWait();
+            } else {
+                LOGGER.error("Failed to print invoice {}", currentInvoiceId);
+                new Alert(Alert.AlertType.ERROR, "Failed to print invoice.").showAndWait();
+            }
+        } else {
+            LOGGER.info("Print job cancelled or no printer available");
+            new Alert(Alert.AlertType.WARNING, "Printing cancelled or no printer available.").showAndWait();
+        }
+    }
+
+    private void exportInvoice() {
+        if (currentInvoiceId == null) {
+            new Alert(Alert.AlertType.WARNING, messages.getString("noInvoiceToExport")).showAndWait();
+            return;
+        }
+        try {
+            FileChooser fileChooser = new FileChooser();
+            fileChooser.setTitle(messages.getString("exportInvoiceCSV"));
+            fileChooser.setInitialFileName(currentInvoiceId + ".csv");
+            File file = fileChooser.showSaveDialog(null);
+            if (file != null) {
+                StringBuilder csv = new StringBuilder();
+                csv.append(messages.getString("invoiceId") + "," + messages.getString("contact") + "," + messages.getString("date") + "," + messages.getString("totalAmount") + "," + messages.getString("currency") + "\n");
+                csv.append(String.format("%s,%s,%s,%s,%s\n", currentInvoiceId,
+                    invoiceTypeCombo.getValue().equals("Import Purchase") ? supplierField.getText() : customerField.getText(),
+                    datePicker.getValue(), totalAmountField.getText(), currencyCombo.getValue()));
+                if (invoiceTypeCombo.getValue().equals("Import Purchase")) {
+                    csv.append(messages.getString("shippingCharge") + "," + messages.getString("transportingFee") + "," + messages.getString("uploadingFee") + "," + messages.getString("taxFee") + "\n");
+                    csv.append(String.format("%s %s,%s %s,%s %s,%s %s\n",
+                        shippingFeeField.getText(), shippingFeeCurrencyCombo.getValue(),
+                        transportingFeeField.getText(), transportingFeeCurrencyCombo.getValue(),
+                        uploadingFeeField.getText(), uploadingFeeCurrencyCombo.getValue(),
+                        taxFeeField.getText(), taxFeeCurrencyCombo.getValue()));
+                }
+                csv.append("\n" + messages.getString("productId") + "," + messages.getString("quantity") + "," + messages.getString("unit") + "," + messages.getString("originalUnitPrice") + "," + messages.getString("adjustedUnitPrice") + "," + messages.getString("discount") + "," + messages.getString("totalPrice") + "\n");
+                for (InvoiceLineItem item : lineItemsTable.getItems()) {
+                    csv.append(String.format("%d,%d,%s,%.2f,%.2f,%.2f,%.2f\n",
+                        item.getProductId(), item.getQuantity(), item.getUnit(), item.getOriginalUnitPrice(),
+                        item.getUnitPrice(), item.getDiscount(), item.getTotalPrice()));
+                }
+                Files.writeString(file.toPath(), csv.toString());
+                new Alert(Alert.AlertType.INFORMATION, messages.getString("invoiceExportedTo") + " " + file.getAbsolutePath()).showAndWait();
+            }
+        } catch (Exception e) {
+            new Alert(Alert.AlertType.ERROR, messages.getString("failedToExportInvoice") + ": " + e.getMessage()).showAndWait();
+        }
+    }
+
+    private void addAttachment() {
+        if (currentInvoiceId == null) {
+            new Alert(Alert.AlertType.WARNING, messages.getString("saveInvoiceFirst")).showAndWait();
+            return;
+        }
+        FileChooser fileChooser = new FileChooser();
+        fileChooser.setTitle(messages.getString("addAttachment"));
+        File file = fileChooser.showOpenDialog(null);
+        if (file != null) {
+            try {
+                byte[] fileData = Files.readAllBytes(file.toPath());
+                dbService.addAttachment(currentInvoiceId, file.getName(), fileData);
+                updateAttachmentButton();
+                new Alert(Alert.AlertType.INFORMATION, messages.getString("attachmentAdded") + ": " + file.getName()).showAndWait();
+            } catch (IOException | DatabaseException e) {
+                LOGGER.error("Failed to add attachment for invoice {}: {}", currentInvoiceId, e.getMessage());
+                new Alert(Alert.AlertType.ERROR, messages.getString("failedToAddAttachment") + ": " + e.getMessage()).showAndWait();
+            }
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private void viewAttachments() {
+        if (currentInvoiceId == null) {
+            LOGGER.warn("No invoice selected to view attachments");
+            new Alert(Alert.AlertType.WARNING, messages.getString("noInvoiceToViewAttachments")).showAndWait();
+            return;
+        }
+
+        LOGGER.info("Attempting to view attachments for invoice {}", currentInvoiceId);
+        try {
+            List<Attachment> attachments = dbService.getAttachmentsForInvoice(currentInvoiceId);
+            LOGGER.debug("Retrieved {} attachments for invoice {}: {}", attachments.size(), currentInvoiceId, attachments);
+
+            if (attachments.isEmpty()) {
+                LOGGER.info("No attachments found for invoice {}", currentInvoiceId);
+                Alert noAttachments = new Alert(Alert.AlertType.INFORMATION);
+                noAttachments.setTitle("View Attachments");
+                noAttachments.setHeaderText(null);
+                noAttachments.setContentText(messages.getString("noAttachmentsFound"));
+                LOGGER.debug("Showing 'No attachments found' dialog for invoice {}", currentInvoiceId);
+                noAttachments.showAndWait();
+                return;
+            }
+
+            LOGGER.debug("Creating attachment dialog for invoice {}", currentInvoiceId);
+            Dialog<Void> dialog = new Dialog<>();
+            dialog.setTitle(messages.getString("viewAttachment"));
+            dialog.setHeaderText(getStringOrDefault("attachmentsForInvoice", "Attachments for Invoice") + " " + currentInvoiceId);
+
+            TableView<Attachment> attachmentTable = new TableView<>();
+            TableColumn<Attachment, Integer> idCol = new TableColumn<>(messages.getString("id"));
+            idCol.setCellValueFactory(new PropertyValueFactory<>("id"));
+            TableColumn<Attachment, String> nameCol = new TableColumn<>(messages.getString("fileName"));
+            nameCol.setCellValueFactory(new PropertyValueFactory<>("fileName"));
+            TableColumn<Attachment, Long> sizeCol = new TableColumn<>(messages.getString("sizeBytes"));
+            sizeCol.setCellValueFactory(new PropertyValueFactory<>("fileSize"));
+            TableColumn<Attachment, String> dateCol = new TableColumn<>(messages.getString("uploadDate"));
+            dateCol.setCellValueFactory(new PropertyValueFactory<>("uploadDate"));
+            attachmentTable.getColumns().addAll((TableColumn<Attachment, ?>[]) new TableColumn[] {idCol, nameCol, sizeCol, dateCol});
+            attachmentTable.getItems().addAll(attachments);
+            attachmentTable.setPrefHeight(200);
+
+            Button downloadButton = new Button(messages.getString("download"));
+            downloadButton.setOnAction(e -> {
+                Attachment selected = attachmentTable.getSelectionModel().getSelectedItem();
+                if (selected != null) {
+                    LOGGER.info("Downloading attachment ID {}: {}", selected.getId(), selected.getFileName());
+                    downloadAttachment(selected.getId(), selected.getFileName());
+                } else {
+                    LOGGER.warn("No attachment selected for download");
+                    new Alert(Alert.AlertType.WARNING, messages.getString("selectAttachmentToDownload")).showAndWait();
+                }
+            });
+
+            Button editButton = new Button(messages.getString("edit"));
+            editButton.setOnAction(e -> {
+                Attachment selected = attachmentTable.getSelectionModel().getSelectedItem();
+                if (selected != null) {
+                    LOGGER.info("Editing attachment ID {}: {}", selected.getId(), selected.getFileName());
+                    editAttachment(selected.getId());
+                } else {
+                    LOGGER.warn("No attachment selected for edit");
+                    new Alert(Alert.AlertType.WARNING, messages.getString("selectAttachmentToEdit")).showAndWait();
+                }
+            });
+
+            Button viewButton = new Button("View"); // New "View" button
+            viewButton.setOnAction(e -> {
+                Attachment selected = attachmentTable.getSelectionModel().getSelectedItem();
+                if (selected != null) {
+                    LOGGER.info("Viewing attachment ID {}: {}", selected.getId(), selected.getFileName());
+                    try {
+                        // Save attachment to a temporary file
+                        File tempFile = File.createTempFile("attachment_", "_" + selected.getFileName());
+                        try (FileOutputStream fos = new FileOutputStream(tempFile)) {
+                            byte[] content = dbService.getAttachmentContent(selected.getId());
+                            fos.write(content);
+                        }
+                        // Open with default application
+                        Desktop.getDesktop().open(tempFile);
+                        LOGGER.debug("Opened attachment {} in default viewer", selected.getFileName());
+                        // Optional: Delete temp file after opening (may not work if app holds it open)
+                        tempFile.deleteOnExit();
+                    } catch (IOException ex) {
+                        LOGGER.error("Failed to open attachment {}: {}", selected.getFileName(), ex.getMessage(), ex);
+                        new Alert(Alert.AlertType.ERROR, "Failed to open attachment: " + ex.getMessage()).showAndWait();
+                    } catch (DatabaseException ex) {
+                        LOGGER.error("Failed to retrieve attachment content {}: {}", selected.getFileName(), ex.getMessage(), ex);
+                        new Alert(Alert.AlertType.ERROR, "Failed to retrieve attachment: " + ex.getMessage()).showAndWait();
+                    }
+                } else {
+                    LOGGER.warn("No attachment selected for view");
+                    new Alert(Alert.AlertType.WARNING, "Please select an attachment to view.").showAndWait();
+                }
+            });
+
+            HBox buttonBox = new HBox(10, downloadButton, editButton, viewButton); // Added viewButton
+            VBox dialogContent = new VBox(10, attachmentTable, buttonBox);
+            dialog.getDialogPane().setContent(dialogContent);
+            dialog.getDialogPane().getButtonTypes().add(ButtonType.CLOSE);
+
+            LOGGER.debug("Showing attachment dialog for invoice {}", currentInvoiceId);
+            dialog.showAndWait();
+            LOGGER.info("Attachment dialog closed for invoice {}", currentInvoiceId);
+        } catch (DatabaseException e) {
+            LOGGER.error("Failed to load attachments for invoice {}: {}", currentInvoiceId, e.getMessage(), e);
+            new Alert(Alert.AlertType.ERROR, messages.getString("failedToLoadAttachments") + ": " + e.getMessage()).showAndWait();
+        } catch (Exception e) {
+            LOGGER.error("Unexpected error viewing attachments for invoice {}: {}", currentInvoiceId, e.getMessage(), e);
+            new Alert(Alert.AlertType.ERROR, "Unexpected error while viewing attachments: " + e.getMessage()).showAndWait();
+        }
+    }
+
+    private void downloadAttachment(int attachmentId, String fileName) {
+        try {
+            byte[] content = dbService.getAttachmentContent(attachmentId);
+            FileChooser fileChooser = new FileChooser();
+            fileChooser.setTitle(messages.getString("saveAttachment"));
+            fileChooser.setInitialFileName(fileName);
+            File file = fileChooser.showSaveDialog(null);
+            if (file != null) {
+                try (FileOutputStream fos = new FileOutputStream(file)) {
+                    fos.write(content);
+                }
+                new Alert(Alert.AlertType.INFORMATION, messages.getString("attachmentSavedTo") + " " + file.getAbsolutePath()).showAndWait();
+            }
+        } catch (DatabaseException | IOException e) {
+            new Alert(Alert.AlertType.ERROR, messages.getString("failedToDownloadAttachment") + ": " + e.getMessage()).showAndWait();
+        }
+    }
+
+    private void editAttachment(int attachmentId) {
+        FileChooser fileChooser = new FileChooser();
+        fileChooser.setTitle(messages.getString("replaceAttachment"));
+        File file = fileChooser.showOpenDialog(null);
+        if (file != null) {
+            try {
+                dbService.updateAttachment(attachmentId, file);
+                new Alert(Alert.AlertType.INFORMATION, messages.getString("attachmentUpdated") + ": " + file.getName()).showAndWait();
+                viewAttachments();
+            } catch (DatabaseException e) {
+                new Alert(Alert.AlertType.ERROR, messages.getString("failedToUpdateAttachment") + ": " + e.getMessage()).showAndWait();
+            }
+        }
+    }
+
+    private void updateUnitCombo(String productText) {
+        try {
+            if (productText != null && !productText.trim().isEmpty()) {
+                int productId = Integer.parseInt(productText.split(" - ")[0]);
+                List<String> units = dbService.getProductUnits(productId);
+                unitCombo.getItems().clear();
+                unitCombo.getItems().addAll(units);
+                unitCombo.setValue(units.get(0));
+            } else {
+                unitCombo.getItems().clear();
+                unitCombo.setPromptText(messages.getString("selectProductFirst"));
+            }
+        } catch (DatabaseException e) {
+            unitCombo.getItems().clear();
+            unitCombo.setPromptText(messages.getString("errorLoadingUnits"));
+        }
+    }
+
+    private void updateAttachmentButton() {
+        if (currentInvoiceId != null) {
+            try {
+                int count = dbService.getAttachmentCount(currentInvoiceId, "invoices");
+                attachmentButton.setText(messages.getString("addAttachment") + " (" + count + ")");
+            } catch (DatabaseException e) {
+                LOGGER.error("Failed to update attachment count for invoice {}: {}", currentInvoiceId, e.getMessage());
+                attachmentButton.setText(messages.getString("addAttachment") + " (Error)");
+            }
+        } else {
+            attachmentButton.setText(messages.getString("addAttachment") + " (0)");
+        }
+    }
+
+    public void refreshLanguage(ResourceBundle newMessages) {
+        this.messages = newMessages;
+        invoiceIdLabel.setText(messages.getString("invoiceId") + ": " + (currentInvoiceId != null ? currentInvoiceId : messages.getString("notYetSaved")));
+        invoiceTypeLabel.setText(messages.getString("invoiceType"));
+        customerLabel.setText(messages.getString("customer"));
+        supplierLabel.setText(messages.getString("supplier"));
+        dateLabel.setText(messages.getString("date"));
+        totalAmountLabel.setText(messages.getString("totalAmount"));
+        invoiceCurrencyLabel.setText(messages.getString("currency"));
+        invoiceRateLabel.setText(messages.getString("exchangeRate"));
+        paymentInstructionsLabel.setText(messages.getString("paymentInstructions"));
+        paymentTermLabel.setText(messages.getString("paymentTerm"));
+        notesLabel.setText(messages.getString("notes"));
+        shippingFeeLabel.setText(messages.getString("shippingCharge"));
+        transportingFeeLabel.setText(messages.getString("transportingFee"));
+        uploadingFeeLabel.setText(messages.getString("uploadingFee"));
+        taxFeeLabel.setText(messages.getString("taxFee"));
+        productIdCol.setText(messages.getString("productId"));
+        warehouseIdCol.setText(messages.getString("warehouseId"));
+        quantityCol.setText(messages.getString("quantity"));
+        unitCol.setText(messages.getString("unit"));
+        originalPriceCol.setText(messages.getString("originalUnitPrice"));
+        unitPriceCol.setText(messages.getString("adjustedUnitPrice"));
+        discountCol.setText(messages.getString("discount"));
+        totalPriceCol.setText(messages.getString("totalPrice"));
+        currencyCol.setText(messages.getString("currency"));
+        productLabel.setText(messages.getString("product"));
+        warehouseIdLabel.setText(messages.getString("warehouseId"));
+        quantityLabel.setText(messages.getString("quantity"));
+        unitLabel.setText(messages.getString("unit"));
+        unitPriceLabel.setText(messages.getString("unitPrice"));
+        discountLabel.setText(messages.getString("discount"));
+        itemCurrencyLabel.setText(messages.getString("currency"));
+        itemRateLabel.setText(messages.getString("exchangeRate"));
+        addItemButton.setText(messages.getString("addLineItem"));
+        deleteItemButton.setText(messages.getString("deleteItem"));
+        editItemButton.setText(messages.getString("editItem"));
+        newInvoiceButton.setText(messages.getString("newInvoice"));
+        saveButton.setText(messages.getString("save"));
+        editInvoiceButton.setText(messages.getString("browseInvoices"));
+        deleteInvoiceButton.setText(messages.getString("deleteInvoice"));
+        printButton.setText(messages.getString("print"));
+        exportButton.setText(messages.getString("exportToPdf"));
+        attachmentButton.setText(messages.getString("addAttachment") + " (" + (currentInvoiceId != null ? getAttachmentCount() : "0") + ")");
+        viewAttachmentsButton.setText(messages.getString("viewAttachment"));
+    }
+
+    private String getAttachmentCount() {
+        try {
+            return String.valueOf(dbService.getAttachmentCount(currentInvoiceId, "invoices"));
+        } catch (DatabaseException e) {
+            LOGGER.error("Failed to get attachment count", e);
+            return messages.getString("error");
+        }
+    }
+}

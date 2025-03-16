@@ -1,0 +1,1393 @@
+package com.example.financial;
+
+import javafx.application.Application;
+import javafx.application.Platform;
+import javafx.geometry.Rectangle2D;
+import javafx.scene.Scene;
+import javafx.scene.control.*;
+import javafx.scene.control.cell.PropertyValueFactory;
+import javafx.scene.layout.*;
+import javafx.stage.Screen;
+import javafx.stage.Stage;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import java.util.Collections;
+import java.util.List;
+import java.util.Locale;
+import java.util.Optional;
+import java.util.ResourceBundle;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import com.zaxxer.hikari.HikariConfig;
+import com.zaxxer.hikari.HikariDataSource;
+import javafx.scene.control.DatePicker;
+import javafx.scene.layout.HBox;
+import java.time.LocalDate;
+import java.util.HashMap;
+import java.util.Map;
+import java.util.ArrayList;
+import javafx.scene.control.ScrollPane;
+import javafx.print.PrinterJob;
+import java.sql.*;
+import java.text.DecimalFormat;
+import javafx.animation.FillTransition;
+import javafx.animation.ScaleTransition;
+import javafx.scene.paint.Color;
+import javafx.util.Duration;
+import javafx.animation.KeyFrame;
+import javafx.animation.KeyValue;
+import javafx.animation.Timeline;
+import javafx.scene.layout.Background;
+import javafx.scene.layout.BackgroundFill;
+import javafx.scene.layout.CornerRadii;
+import javafx.geometry.Insets;
+import javafx.geometry.Pos;
+
+public class FinancialManagementApp extends Application {
+    private static final Logger LOGGER = LoggerFactory.getLogger(FinancialManagementApp.class);
+    private static HikariDataSource dataSource;
+    private static final int SCHEDULER_POOL_SIZE = 1;
+    private static final long SCHEDULER_INTERVAL_MINUTES = 1440; // 1 day
+    public static final ExecutorService executor = Executors.newFixedThreadPool(10);
+    private ResourceBundle messages;
+    private ScheduledExecutorService scheduler;
+    private DatabaseService dbService;
+    private AuditService auditService;
+    private ExchangeRateService exchangeRateService;
+    private String currentUser;
+    private final AtomicBoolean isDisposed = new AtomicBoolean(false);
+    private Label statusLabel;
+    private ProgressBar progressBar;
+    private ContactsPane contactsPane;
+
+    @Override
+    public void init() throws Exception {
+        if (dataSource == null) {
+            HikariConfig config = new HikariConfig();
+            config.setJdbcUrl("jdbc:h2:mem:testdb;DB_CLOSE_DELAY=-1;INIT=RUNSCRIPT FROM 'classpath:schema.sql'");
+            config.setDriverClassName("org.h2.Driver");
+            config.setUsername("sa");
+            config.setPassword("");
+            dataSource = new HikariDataSource(config);
+            LOGGER.info("Database configured with URL: {}", config.getJdbcUrl());
+        }
+        try {
+            messages = ResourceBundle.getBundle("messages", Locale.ENGLISH);
+            LOGGER.info("Resource bundle loaded successfully for English");
+        } catch (Exception e) {
+            LOGGER.error("Failed to load messages bundle in init()", e);
+            throw new RuntimeException("Cannot start application: Resource bundle missing", e);
+        }
+    }
+
+    @Override
+    public void start(Stage primaryStage) {
+        dbService = new DatabaseService();
+        auditService = new AuditService(dbService);
+        exchangeRateService = new ExchangeRateService();
+        currentUser = "user";
+
+        setLanguage("en");
+
+        BorderPane root = new BorderPane();
+        root.setStyle("-fx-background-color: linear-gradient(to bottom, #E0F7FA, #B2EBF2);");
+
+        ToolBar topBar = createTopBar();
+        HBox statusBar = createStatusBar();
+
+        root.setTop(topBar);
+        root.setBottom(statusBar);
+
+        // Get screen bounds and set a reasonable window size
+        Rectangle2D screenBounds = Screen.getPrimary().getVisualBounds();
+        double width = Math.min(1280, screenBounds.getWidth() * 0.9);  // 90% of screen width, max 1280
+        double height = Math.min(800, screenBounds.getHeight() * 0.9); // 90% of screen height, max 800
+        Scene scene = new Scene(root, width, height);
+        scene.getStylesheets().add(getClass().getResource("/styles.css").toExternalForm());
+        primaryStage.setTitle(messages.getString("title"));
+        primaryStage.setScene(scene);
+
+        if (!configureDatabase(primaryStage)) {
+            LOGGER.info("Database configuration cancelled, exiting...");
+            primaryStage.close();
+            return;
+        }
+
+        TabPane tabPane = createTabPane();
+        root.setCenter(tabPane);
+
+        Tab auditTab = tabPane.getTabs().stream()
+            .filter(tab -> tab.getText().equals(messages.getString("auditTrail")))
+            .findFirst()
+            .orElse(null);
+        if (auditTab != null) {
+            AuditTrailPane auditPane = (AuditTrailPane) auditTab.getContent();
+            auditPane.loadAuditTrail();
+        }
+
+        primaryStage.setUserData(this);
+        primaryStage.show();
+        startScheduledTasks();
+
+        // Center the window on the screen
+        primaryStage.setX((screenBounds.getWidth() - primaryStage.getWidth()) / 2);
+        primaryStage.setY((screenBounds.getHeight() - primaryStage.getHeight()) / 2);
+    }
+
+    private ToolBar createTopBar() {
+        ToolBar topBar = new ToolBar();
+        topBar.setStyle("-fx-background-color: linear-gradient(to bottom, #0288D1, #0277BD); " +
+                        "-fx-background-radius: 5; " +
+                        "-fx-effect: dropshadow(gaussian, rgba(0,0,0,0.3), 5, 0, 0, 2);");
+        topBar.setPadding(new Insets(5));
+
+        ComboBox<String> themeCombo = new ComboBox<>();
+        themeCombo.getItems().addAll(messages.getString("themeLight"), messages.getString("themeDark"));
+        themeCombo.setValue(messages.getString("themeLight"));
+        themeCombo.setOnAction(e -> changeTheme(themeCombo.getValue()));
+        styleComboBox(themeCombo);
+        topBar.getItems().add(themeCombo);
+        topBar.getItems().add(new Separator());
+
+        ComboBox<String> languageCombo = new ComboBox<>();
+        languageCombo.getItems().addAll(messages.getString("langEnglish"), messages.getString("langArabic"));
+        languageCombo.setValue(messages.getString("langEnglish"));
+        languageCombo.setOnAction(e -> setLanguage(languageCombo.getValue().equals(messages.getString("langEnglish")) ? "en" : "ar"));
+        styleComboBox(languageCombo);
+        topBar.getItems().add(languageCombo);
+        topBar.getItems().add(new Separator());
+
+        Button newInvoiceButton = new Button(messages.getString("newInvoice"));
+        styleButton(newInvoiceButton, "#2196F3", "#1e87d9");
+        newInvoiceButton.setOnAction(e -> {
+            applyClickEffect(newInvoiceButton, "#2196F3");
+            openNewInvoiceWindow();
+        });
+        topBar.getItems().add(newInvoiceButton);
+        topBar.getItems().add(new Separator());
+
+        Button markPaymentButton = new Button(messages.getString("markPayment"));
+        styleButton(markPaymentButton, "#4CAF50", "#45a049");
+        markPaymentButton.setOnAction(e -> {
+            applyClickEffect(markPaymentButton, "#4CAF50");
+            markPaymentReceived();
+        });
+        topBar.getItems().add(markPaymentButton);
+        topBar.getItems().add(new Separator());
+
+        Button addCustomerButton = new Button(messages.getString("addCustomer"));
+        styleButton(addCustomerButton, "#FF9800", "#e68a00");
+        addCustomerButton.setOnAction(e -> {
+            applyClickEffect(addCustomerButton, "#FF9800");
+            openAddCustomerWindow();
+        });
+        topBar.getItems().add(addCustomerButton);
+        topBar.getItems().add(new Separator());
+
+        Button addSupplierButton = new Button(messages.getString("addSupplier"));
+        styleButton(addSupplierButton, "#9C27B0", "#8e24aa");
+        addSupplierButton.setOnAction(e -> {
+            applyClickEffect(addSupplierButton, "#9C27B0");
+            openAddSupplierWindow();
+        });
+        topBar.getItems().add(addSupplierButton);
+        topBar.getItems().add(new Separator());
+
+        MenuButton databaseMenuButton = new MenuButton(messages.getString("database"));
+        styleMenuButton(databaseMenuButton, "#3F51B5", "#3949ab");
+        MenuItem changeDbItem = new MenuItem(messages.getString("changeDatabase"));
+        changeDbItem.setOnAction(e -> changeDatabase());
+        MenuItem newDbItem = new MenuItem(messages.getString("newDatabase"));
+        newDbItem.setOnAction(e -> createNewDatabase());
+        databaseMenuButton.getItems().addAll(changeDbItem, newDbItem);
+        topBar.getItems().add(databaseMenuButton);
+
+        return topBar;
+    }
+
+    private void styleButton(Button button, String colorStart, String colorEnd) {
+        button.setStyle("-fx-background-color: linear-gradient(to bottom, " + colorStart + ", " + colorEnd + "); " +
+                        "-fx-text-fill: white; -fx-font-weight: bold; -fx-padding: 8 16; " +
+                        "-fx-background-radius: 5; -fx-effect: dropshadow(gaussian, rgba(0,0,0,0.3), 5, 0, 0, 2);");
+        button.setOnMouseEntered(e -> button.setStyle(
+                "-fx-background-color: linear-gradient(to bottom, " + lightenColor(colorStart) + ", " + lightenColor(colorEnd) + "); " +
+                "-fx-text-fill: white; -fx-font-weight: bold; -fx-padding: 8 16; " +
+                "-fx-background-radius: 5; -fx-effect: dropshadow(gaussian, rgba(0,0,0,0.5), 8, 0, 0, 3);"));
+        button.setOnMouseExited(e -> button.setStyle(
+                "-fx-background-color: linear-gradient(to bottom, " + colorStart + ", " + colorEnd + "); " +
+                "-fx-text-fill: white; -fx-font-weight: bold; -fx-padding: 8 16; " +
+                "-fx-background-radius: 5; -fx-effect: dropshadow(gaussian, rgba(0,0,0,0.3), 5, 0, 0, 2);"));
+    }
+
+    private void styleComboBox(ComboBox<?> comboBox) {
+        comboBox.setStyle("-fx-background-color: #FFFFFF; -fx-border-color: #0288D1; -fx-border-radius: 5; " +
+                          "-fx-background-radius: 5; -fx-padding: 5; -fx-font-size: 14px;");
+        comboBox.setOnMouseEntered(e -> comboBox.setStyle(
+                "-fx-background-color: #F0F8FF; -fx-border-color: #0277BD; -fx-border-radius: 5; " +
+                "-fx-background-radius: 5; -fx-padding: 5; -fx-font-size: 14px;"));
+        comboBox.setOnMouseExited(e -> comboBox.setStyle(
+                "-fx-background-color: #FFFFFF; -fx-border-color: #0288D1; -fx-border-radius: 5; " +
+                "-fx-background-radius: 5; -fx-padding: 5; -fx-font-size: 14px;"));
+    }
+
+    private void styleMenuButton(MenuButton menuButton, String colorStart, String colorEnd) {
+        menuButton.setStyle("-fx-background-color: linear-gradient(to bottom, " + colorStart + ", " + colorEnd + "); " +
+                            "-fx-text-fill: white; -fx-font-weight: bold; -fx-padding: 8 16; " +
+                            "-fx-background-radius: 5; -fx-effect: dropshadow(gaussian, rgba(0,0,0,0.3), 5, 0, 0, 2);");
+        menuButton.setOnMouseEntered(e -> menuButton.setStyle(
+                "-fx-background-color: linear-gradient(to bottom, " + lightenColor(colorStart) + ", " + lightenColor(colorEnd) + "); " +
+                "-fx-text-fill: white; -fx-font-weight: bold; -fx-padding: 8 16; " +
+                "-fx-background-radius: 5; -fx-effect: dropshadow(gaussian, rgba(0,0,0,0.5), 8, 0, 0, 3);"));
+        menuButton.setOnMouseExited(e -> menuButton.setStyle(
+                "-fx-background-color: linear-gradient(to bottom, " + colorStart + ", " + colorEnd + "); " +
+                "-fx-text-fill: white; -fx-font-weight: bold; -fx-padding: 8 16; " +
+                "-fx-background-radius: 5; -fx-effect: dropshadow(gaussian, rgba(0,0,0,0.3), 5, 0, 0, 2);"));
+    }
+
+    private String lightenColor(String hexColor) {
+        Color color = Color.web(hexColor);
+        double r = Math.min(color.getRed() + 0.2, 1.0);
+        double g = Math.min(color.getGreen() + 0.2, 1.0);
+        double b = Math.min(color.getBlue() + 0.2, 1.0);
+        return String.format("#%02X%02X%02X", (int)(r * 255), (int)(g * 255), (int)(b * 255));
+    }
+
+    private void applyClickEffect(Button button, String originalColor) {
+        ScaleTransition scale = new ScaleTransition(Duration.millis(100), button);
+        scale.setToX(0.95);
+        scale.setToY(0.95);
+        scale.setCycleCount(2);
+        scale.setAutoReverse(true);
+        scale.play();
+
+        Timeline colorFlash = new Timeline(
+            new KeyFrame(Duration.ZERO, new KeyValue(button.backgroundProperty(),
+                new Background(new BackgroundFill(Color.LIGHTGRAY, CornerRadii.EMPTY, Insets.EMPTY)))),
+            new KeyFrame(Duration.millis(100), new KeyValue(button.backgroundProperty(),
+                new Background(new BackgroundFill(Color.web(originalColor), CornerRadii.EMPTY, Insets.EMPTY))))
+        );
+        colorFlash.setCycleCount(2);
+        colorFlash.setAutoReverse(true);
+        colorFlash.play();
+    }
+
+    private void setLanguage(String language) {
+        try {
+            messages = ResourceBundle.getBundle("messages", Locale.forLanguageTag(language));
+            LOGGER.info("Switched language to {}", language);
+        } catch (Exception e) {
+            LOGGER.error("Error loading language properties for {}", language, e);
+            messages = ResourceBundle.getBundle("messages", Locale.ENGLISH);
+        }
+        updateUIWithMessages();
+    }
+
+    private void updateUIWithMessages() {
+        if (statusLabel != null) {
+            statusLabel.setText(messages.getString("statusReady"));
+            Stage stage = (Stage) statusLabel.getScene().getWindow();
+            if (stage != null) {
+                stage.setTitle(messages.getString("title"));
+            }
+            BorderPane root = (BorderPane) statusLabel.getScene().getRoot();
+            root.setTop(createTopBar());
+            TabPane tabPane = createTabPane();
+            root.setCenter(tabPane);
+            root.setBottom(createStatusBar());
+        }
+    }
+
+    private boolean configureDatabase(Stage stage) {
+        DatabaseConfigDialog configDialog = new DatabaseConfigDialog(stage, messages, dbService, this);
+        configDialog.showAndWait();
+        return configDialog.isConfirmed();
+    }
+
+    private TabPane createTabPane() {
+        TabPane tabPane = new TabPane();
+        contactsPane = new ContactsPane(messages, dbService, auditService, exchangeRateService);
+        tabPane.getTabs().addAll(
+            new Tab(messages.getString("dashboard"), new CustomDashboardPane(messages, dbService, auditService, exchangeRateService)),
+            new Tab(messages.getString("importPurchase"), new InvoicePane(messages, dbService, auditService, exchangeRateService, false)),
+            new Tab(messages.getString("recurringInvoices"), new RecurringInvoicePane(messages, dbService, auditService)),
+            new Tab(messages.getString("inventory"), new InventoryPane(messages, dbService, auditService)),
+            new Tab(messages.getString("attachments"), new AttachmentPane(messages, dbService, auditService)),
+            new Tab(messages.getString("customersSuppliers"), contactsPane),
+            new Tab(messages.getString("expenses"), new ExpensesPane(messages, dbService, auditService)),
+            new Tab(messages.getString("reports"), new ReportPane(messages, dbService, auditService)),
+            new Tab(messages.getString("adjustments"), new AdjustmentsPane(messages, dbService, auditService)),
+            new Tab(messages.getString("auditTrail"), new AuditTrailPane(messages, dbService, auditService))
+        );
+        tabPane.setTabClosingPolicy(TabPane.TabClosingPolicy.UNAVAILABLE);
+        restrictAccessBasedOnRole(tabPane, currentUser);
+        return tabPane;
+    }
+
+    private HBox createStatusBar() {
+        HBox statusBar = new HBox(10);
+        statusBar.setPadding(new Insets(5));
+        statusBar.setStyle("-fx-background-color: #F5F5F5; -fx-border-color: #E0E0E0; -fx-border-width: 1 0 0 0;");
+        statusLabel = new Label(messages.getString("statusReady"));
+        progressBar = new ProgressBar();
+        progressBar.setVisible(false);
+        statusBar.getChildren().addAll(statusLabel, progressBar);
+        return statusBar;
+    }
+
+    private void changeTheme(String theme) {
+        Scene scene = statusLabel.getScene();
+        scene.getStylesheets().clear();
+        scene.getStylesheets().add(getClass().getResource("/styles.css").toExternalForm());
+        if ("Dark".equals(theme) || messages.getString("themeDark").equals(theme)) {
+            scene.getStylesheets().add(getClass().getResource("/dark-theme.css").toExternalForm());
+        }
+    }
+
+    private void openNewInvoiceWindow() {
+        Stage newStage = new Stage();
+        newStage.setTitle(messages.getString("newInvoice"));
+        InvoicePane invoicePane = new InvoicePane(messages, dbService, auditService, exchangeRateService, true);
+        Scene scene = new Scene(invoicePane, 900, 700);
+        scene.getStylesheets().add(getClass().getResource("/styles.css").toExternalForm());
+        newStage.setScene(scene);
+        newStage.show();
+    }
+
+    private void openAddCustomerWindow() {
+        Stage customerStage = new Stage();
+        customerStage.setTitle(messages.getString("addCustomer"));
+
+        GridPane grid = new GridPane();
+        grid.setHgap(10);
+        grid.setVgap(10);
+        grid.setPadding(new Insets(10));
+
+        TextField nameField = new TextField();
+        nameField.setPromptText(messages.getString("name"));
+        TextField contactField = new TextField();
+        contactField.setPromptText(messages.getString("contactInfo"));
+        Label customerIdLabel = new Label("Customer ID: Auto-generated");
+
+        grid.add(new Label(messages.getString("name") + ":"), 0, 0);
+        grid.add(nameField, 1, 0);
+        grid.add(new Label(messages.getString("contactInfo") + ":"), 0, 1);
+        grid.add(contactField, 1, 1);
+        grid.add(customerIdLabel, 0, 2, 2, 1);
+
+        Button saveButton = new Button(messages.getString("save"));
+        saveButton.setStyle("-fx-background-color: linear-gradient(to bottom, #4CAF50, #45a049); -fx-text-fill: white; " +
+                            "-fx-font-weight: bold; -fx-padding: 8 16; -fx-background-radius: 5; " +
+                            "-fx-effect: dropshadow(gaussian, rgba(0,0,0,0.3), 5, 0, 0, 2);");
+        saveButton.setOnAction(e -> {
+            applyClickEffect(saveButton, "#4CAF50");
+            String name = nameField.getText();
+            String contactInfo = contactField.getText();
+            if (name.isEmpty()) {
+                new Alert(Alert.AlertType.WARNING, messages.getString("nameRequired")).showAndWait();
+                return;
+            }
+            String idText = customerIdLabel.getText();
+            if (idText.equals("Customer ID: Auto-generated")) {
+                CompletableFuture.runAsync(() -> {
+                    try {
+                        int customerId = dbService.addCustomer(name, contactInfo);
+                        auditService.logAction(currentUser, "Customers", String.valueOf(customerId), "Added customer: " + name, null, null);
+                        javafx.application.Platform.runLater(() -> {
+                            customerIdLabel.setText("Customer ID: " + customerId);
+                            new Alert(Alert.AlertType.INFORMATION, messages.getString("customerAdded") + ": " + name + " (ID: " + customerId + ")").showAndWait();
+                        });
+                    } catch (DatabaseException ex) {
+                        ErrorHandler.handleException(ex, messages.getString("failedToAddCustomer"), null);
+                    }
+                }, executor);
+            } else {
+                try {
+                    int customerId = Integer.parseInt(idText.replace("Customer ID: ", ""));
+                    CompletableFuture.runAsync(() -> {
+                        try {
+                            dbService.updateCustomer(customerId, name, contactInfo);
+                            auditService.logAction(currentUser, "Customers", String.valueOf(customerId), "Edited customer: " + name, null, null);
+                            javafx.application.Platform.runLater(() -> {
+                                new Alert(Alert.AlertType.INFORMATION, "Customer updated: " + name + " (ID: " + customerId + ")").showAndWait();
+                            });
+                        } catch (DatabaseException ex) {
+                            ErrorHandler.handleException(ex, "Failed to update customer", null);
+                        }
+                    }, executor);
+                } catch (NumberFormatException ex) {
+                    new Alert(Alert.AlertType.ERROR, "Invalid Customer ID format").showAndWait();
+                }
+            }
+        });
+
+        Button newButton = new Button("New");
+        newButton.setStyle("-fx-background-color: linear-gradient(to bottom, #2196F3, #1e87d9); -fx-text-fill: white; " +
+                           "-fx-font-weight: bold; -fx-padding: 8 16; -fx-background-radius: 5; " +
+                           "-fx-effect: dropshadow(gaussian, rgba(0,0,0,0.3), 5, 0, 0, 2);");
+        newButton.setOnAction(e -> {
+            applyClickEffect(newButton, "#2196F3");
+            LOGGER.info("New button clicked - resetting customer fields");
+            nameField.clear();
+            contactField.clear();
+            customerIdLabel.setText("Customer ID: Auto-generated");
+        });
+
+        Button editButton = new Button("Edit");
+        editButton.setStyle("-fx-background-color: linear-gradient(to bottom, #FF9800, #e68a00); -fx-text-fill: white; " +
+                            "-fx-font-weight: bold; -fx-padding: 8 16; -fx-background-radius: 5; " +
+                            "-fx-effect: dropshadow(gaussian, rgba(0,0,0,0.3), 5, 0, 0, 2);");
+        editButton.setOnAction(e -> {
+            applyClickEffect(editButton, "#FF9800");
+            Dialog<Void> editDialog = new Dialog<>();
+            editDialog.setTitle("Edit Customer");
+            editDialog.setHeaderText("Search for Customer to Edit");
+
+            VBox dialogContent = new VBox(10);
+            TextField searchField = new TextField();
+            searchField.setPromptText("Type customer name (e.g., '1 - Ahmed')");
+            ContextMenu suggestions = new ContextMenu();
+            searchField.textProperty().addListener((obs, oldVal, newVal) -> {
+                if (newVal == null || newVal.trim().isEmpty()) {
+                    suggestions.hide();
+                    return;
+                }
+                try {
+                    List<String> customers = dbService.getCustomersWithNames();
+                    suggestions.getItems().clear();
+                    String lowerInput = newVal.toLowerCase();
+                    for (String customer : customers) {
+                        if (customer.toLowerCase().contains(lowerInput)) {
+                            MenuItem item = new MenuItem(customer);
+                            item.setOnAction(event -> {
+                                searchField.setText(customer);
+                                suggestions.hide();
+                                searchField.requestFocus();
+                                try {
+                                    int id = Integer.parseInt(customer.split(" - ")[0]);
+                                    Map<String, String> customerData = dbService.getCustomerById(id);
+                                    if (customerData != null) {
+                                        nameField.setText(customerData.get("name"));
+                                        contactField.setText(customerData.get("contactInfo"));
+                                        customerIdLabel.setText("Customer ID: " + id);
+                                        editDialog.close();
+                                    } else {
+                                        new Alert(Alert.AlertType.ERROR, "Customer " + customer + " not found").showAndWait();
+                                    }
+                                } catch (NumberFormatException ex) {
+                                    new Alert(Alert.AlertType.ERROR, "Invalid Customer ID format in selection").showAndWait();
+                                } catch (DatabaseException ex) {
+                                    LOGGER.error("Failed to fetch customer for editing", ex);
+                                    new Alert(Alert.AlertType.ERROR, "Error fetching customer: " + ex.getMessage()).showAndWait();
+                                }
+                            });
+                            suggestions.getItems().add(item);
+                        }
+                    }
+                    if (!suggestions.getItems().isEmpty()) {
+                        suggestions.show(searchField, javafx.geometry.Side.BOTTOM, 0, 0);
+                    } else {
+                        suggestions.hide();
+                    }
+                } catch (DatabaseException ex) {
+                    LOGGER.error("Failed to fetch customers for smart search", ex);
+                    new Alert(Alert.AlertType.ERROR, "Error fetching customers: " + ex.getMessage()).showAndWait();
+                }
+            });
+
+            dialogContent.getChildren().add(searchField);
+            editDialog.getDialogPane().setContent(dialogContent);
+            editDialog.getDialogPane().getButtonTypes().add(ButtonType.CANCEL);
+            editDialog.showAndWait();
+        });
+
+        HBox buttonBox = new HBox(10, saveButton, newButton, editButton);
+        grid.add(buttonBox, 0, 3, 2, 1);
+
+        Scene scene = new Scene(grid, 400, 200);
+        scene.getStylesheets().add(getClass().getResource("/styles.css").toExternalForm());
+        customerStage.setScene(scene);
+        customerStage.show();
+    }
+
+    private void openAddSupplierWindow() {
+        Stage supplierStage = new Stage();
+        supplierStage.setTitle(messages.getString("addSupplier"));
+
+        GridPane grid = new GridPane();
+        grid.setHgap(10);
+        grid.setVgap(10);
+        grid.setPadding(new Insets(10));
+
+        TextField nameField = new TextField();
+        nameField.setPromptText(messages.getString("name"));
+        TextField contactField = new TextField();
+        contactField.setPromptText(messages.getString("contactInfo"));
+        Label supplierIdLabel = new Label("Supplier ID: Auto-generated");
+
+        grid.add(new Label(messages.getString("name") + ":"), 0, 0);
+        grid.add(nameField, 1, 0);
+        grid.add(new Label(messages.getString("contactInfo") + ":"), 0, 1);
+        grid.add(contactField, 1, 1);
+        grid.add(supplierIdLabel, 0, 2, 2, 1);
+
+        Button saveButton = new Button(messages.getString("save"));
+        saveButton.setStyle("-fx-background-color: linear-gradient(to bottom, #4CAF50, #45a049); -fx-text-fill: white; " +
+                            "-fx-font-weight: bold; -fx-padding: 8 16; -fx-background-radius: 5; " +
+                            "-fx-effect: dropshadow(gaussian, rgba(0,0,0,0.3), 5, 0, 0, 2);");
+        saveButton.setOnAction(e -> {
+            applyClickEffect(saveButton, "#4CAF50");
+            String name = nameField.getText();
+            String contactInfo = contactField.getText();
+            if (name.isEmpty()) {
+                new Alert(Alert.AlertType.WARNING, messages.getString("nameRequired")).showAndWait();
+                return;
+            }
+            String idText = supplierIdLabel.getText();
+            if (idText.equals("Supplier ID: Auto-generated")) {
+                CompletableFuture.runAsync(() -> {
+                    try {
+                        int supplierId = dbService.addSupplier(name, contactInfo);
+                        auditService.logAction(currentUser, "Suppliers", String.valueOf(supplierId), "Added supplier: " + name, null, null);
+                        javafx.application.Platform.runLater(() -> {
+                            supplierIdLabel.setText("Supplier ID: " + supplierId);
+                            new Alert(Alert.AlertType.INFORMATION, messages.getString("supplierAdded") + ": " + name + " (ID: " + supplierId + ")").showAndWait();
+                        });
+                    } catch (DatabaseException ex) {
+                        ErrorHandler.handleException(ex, messages.getString("failedToAddSupplier"), null);
+                    }
+                }, executor);
+            } else {
+                try {
+                    int supplierId = Integer.parseInt(idText.replace("Supplier ID: ", ""));
+                    CompletableFuture.runAsync(() -> {
+                        try {
+                            dbService.updateSupplier(supplierId, name, contactInfo);
+                            auditService.logAction(currentUser, "Suppliers", String.valueOf(supplierId), "Edited supplier: " + name, null, null);
+                            javafx.application.Platform.runLater(() -> {
+                                new Alert(Alert.AlertType.INFORMATION, "Supplier updated: " + name + " (ID: " + supplierId + ")").showAndWait();
+                            });
+                        } catch (DatabaseException ex) {
+                            ErrorHandler.handleException(ex, "Failed to update supplier", null);
+                        }
+                    }, executor);
+                } catch (NumberFormatException ex) {
+                    new Alert(Alert.AlertType.ERROR, "Invalid Supplier ID format").showAndWait();
+                }
+            }
+        });
+
+        Button newButton = new Button("New");
+        newButton.setStyle("-fx-background-color: linear-gradient(to bottom, #2196F3, #1e87d9); -fx-text-fill: white; " +
+                           "-fx-font-weight: bold; -fx-padding: 8 16; -fx-background-radius: 5; " +
+                           "-fx-effect: dropshadow(gaussian, rgba(0,0,0,0.3), 5, 0, 0, 2);");
+        newButton.setOnAction(e -> {
+            applyClickEffect(newButton, "#2196F3");
+            LOGGER.info("New button clicked - resetting supplier fields");
+            nameField.clear();
+            contactField.clear();
+            supplierIdLabel.setText("Supplier ID: Auto-generated");
+        });
+
+        Button editButton = new Button("Edit");
+        editButton.setStyle("-fx-background-color: linear-gradient(to bottom, #FF9800, #e68a00); -fx-text-fill: white; " +
+                            "-fx-font-weight: bold; -fx-padding: 8 16; -fx-background-radius: 5; " +
+                            "-fx-effect: dropshadow(gaussian, rgba(0,0,0,0.3), 5, 0, 0, 2);");
+        editButton.setOnAction(e -> {
+            applyClickEffect(editButton, "#FF9800");
+            Dialog<Void> editDialog = new Dialog<>();
+            editDialog.setTitle("Edit Supplier");
+            editDialog.setHeaderText("Search for Supplier to Edit");
+
+            VBox dialogContent = new VBox(10);
+            TextField searchField = new TextField();
+            searchField.setPromptText("Type supplier name (e.g., '1 - SupplierA')");
+            ContextMenu suggestions = new ContextMenu();
+            searchField.textProperty().addListener((obs, oldVal, newVal) -> {
+                if (newVal == null || newVal.trim().isEmpty()) {
+                    suggestions.hide();
+                    return;
+                }
+                try {
+                    List<String> suppliers = dbService.getSuppliersWithNames();
+                    suggestions.getItems().clear();
+                    String lowerInput = newVal.toLowerCase();
+                    for (String supplier : suppliers) {
+                        if (supplier.toLowerCase().contains(lowerInput)) {
+                            MenuItem item = new MenuItem(supplier);
+                            item.setOnAction(event -> {
+                                searchField.setText(supplier);
+                                suggestions.hide();
+                                searchField.requestFocus();
+                                try {
+                                    int id = Integer.parseInt(supplier.split(" - ")[0]);
+                                    Map<String, String> supplierData = dbService.getSupplierById(id);
+                                    if (supplierData != null) {
+                                        nameField.setText(supplierData.get("name"));
+                                        contactField.setText(supplierData.get("contactInfo"));
+                                        supplierIdLabel.setText("Supplier ID: " + id);
+                                        editDialog.close();
+                                    } else {
+                                        new Alert(Alert.AlertType.ERROR, "Supplier " + supplier + " not found").showAndWait();
+                                    }
+                                } catch (NumberFormatException ex) {
+                                    new Alert(Alert.AlertType.ERROR, "Invalid Supplier ID format in selection").showAndWait();
+                                } catch (DatabaseException ex) {
+                                    LOGGER.error("Failed to fetch supplier for editing", ex);
+                                    new Alert(Alert.AlertType.ERROR, "Error fetching supplier: " + ex.getMessage()).showAndWait();
+                                }
+                            });
+                            suggestions.getItems().add(item);
+                        }
+                    }
+                    if (!suggestions.getItems().isEmpty()) {
+                        suggestions.show(searchField, javafx.geometry.Side.BOTTOM, 0, 0);
+                    } else {
+                        suggestions.hide();
+                    }
+                } catch (DatabaseException ex) {
+                    LOGGER.error("Failed to fetch suppliers for smart search", ex);
+                    new Alert(Alert.AlertType.ERROR, "Error fetching suppliers: " + ex.getMessage()).showAndWait();
+                }
+            });
+
+            dialogContent.getChildren().add(searchField);
+            editDialog.getDialogPane().setContent(dialogContent);
+            editDialog.getDialogPane().getButtonTypes().add(ButtonType.CANCEL);
+            editDialog.showAndWait();
+        });
+
+        HBox buttonBox = new HBox(10, saveButton, newButton, editButton);
+        grid.add(buttonBox, 0, 3, 2, 1);
+
+        Scene scene = new Scene(grid, 400, 200);
+        scene.getStylesheets().add(getClass().getResource("/styles.css").toExternalForm());
+        supplierStage.setScene(scene);
+        supplierStage.show();
+    }
+
+        public void markPaymentReceived() {
+        Dialog<ButtonType> paymentDialog = new Dialog<>();
+        paymentDialog.setTitle(messages.getString("markPayment"));
+        paymentDialog.setHeaderText("Enter Payment Details");
+
+        GridPane grid = new GridPane();
+        grid.setHgap(10);
+        grid.setVgap(10);
+
+        TextField contactField = new TextField();
+        contactField.setPromptText(messages.getString("contactInfo"));
+        contactField.textProperty().addListener((obs, oldVal, newVal) -> {
+            try {
+                suggestContacts(contactField, newVal);
+            } catch (DatabaseException e) {
+                LOGGER.error("Failed to suggest contacts", e);
+                Platform.runLater(() -> 
+                    new Alert(Alert.AlertType.ERROR, "Error suggesting contacts: " + e.getMessage()).showAndWait());
+            }
+        });
+
+        Label currentBalanceLabel = new Label("Current Balance: N/A");
+        Label paymentIdLabel = new Label("Payment ID: Auto-generated");
+        DatePicker datePicker = new DatePicker(LocalDate.now());
+
+        TextField amountField1 = new TextField();
+        amountField1.setPromptText("Enter first amount");
+        ComboBox<String> currencyDropdown1 = new ComboBox<>();
+        currencyDropdown1.getItems().addAll("USD", "IQD", "RMB");
+        currencyDropdown1.setValue("USD");
+        Label exchangeRateLabel1 = new Label("Exchange Rate (to USD):");
+        TextField exchangeRateField1 = new TextField("1.0");
+        exchangeRateLabel1.visibleProperty().bind(currencyDropdown1.valueProperty().isNotEqualTo("USD"));
+        exchangeRateField1.visibleProperty().bind(currencyDropdown1.valueProperty().isNotEqualTo("USD"));
+
+        TextField amountField2 = new TextField();
+        amountField2.setPromptText("Enter second amount (optional)");
+        ComboBox<String> currencyDropdown2 = new ComboBox<>();
+        currencyDropdown2.getItems().addAll("USD", "IQD", "RMB");
+        currencyDropdown2.setValue("IQD");
+        Label exchangeRateLabel2 = new Label("Exchange Rate (to USD):");
+        TextField exchangeRateField2 = new TextField("1.0");
+        exchangeRateLabel2.visibleProperty().bind(currencyDropdown2.valueProperty().isNotEqualTo("USD"));
+        exchangeRateField2.visibleProperty().bind(currencyDropdown2.valueProperty().isNotEqualTo("USD"));
+
+        Label newBalanceLabel = new Label("New Balance: N/A");
+
+        Runnable updateBalance = () -> {
+            String contactName = contactField.getText();
+            if (contactName == null || contactName.trim().isEmpty()) {
+                currentBalanceLabel.setText("Current Balance: N/A");
+                newBalanceLabel.setText("New Balance: N/A");
+                return;
+            }
+            try {
+                int contactId = Integer.parseInt(contactName.split(" - ")[0]);
+                boolean isCustomer = dbService.getCustomersWithNames().contains(contactName);
+                Map<String, Double> invoiceTotals = isCustomer ? 
+                    dbService.getCustomerInvoiceTotal(contactId) : dbService.getSupplierInvoiceTotal(contactId);
+                List<Map<String, String>> payments = isCustomer ? 
+                    dbService.getCustomerPayments(contactId) : dbService.getSupplierPayments(contactId);
+                Map<String, Double> paymentTotals = new HashMap<>();
+                for (Map<String, String> payment : payments) {
+                    String currency = payment.get("currency");
+                    double amount = Double.parseDouble(payment.get("amount"));
+                    paymentTotals.merge(currency, amount, Double::sum);
+                }
+                double usdInvoices = invoiceTotals.getOrDefault("USD", 0.0);
+                double usdPayments = paymentTotals.getOrDefault("USD", 0.0);
+                double usdNet = isCustomer ? usdInvoices - usdPayments : usdPayments - usdInvoices;
+                double iqdInvoices = invoiceTotals.getOrDefault("IQD", 0.0);
+                double iqdPayments = paymentTotals.getOrDefault("IQD", 0.0);
+                double iqdNet = isCustomer ? iqdInvoices - iqdPayments : iqdPayments - iqdInvoices;
+                DecimalFormat df = new DecimalFormat("#,##0.00");
+
+                List<String> weOweParts = new ArrayList<>();
+                List<String> owesUsParts = new ArrayList<>();
+                if (usdNet > 0) owesUsParts.add("$" + df.format(usdNet) + " USD");
+                else if (usdNet < 0) weOweParts.add("$" + df.format(Math.abs(usdNet)) + " USD");
+                if (iqdNet > 0) owesUsParts.add(df.format(iqdNet) + " IQD");
+                else if (iqdNet < 0) weOweParts.add(df.format(Math.abs(iqdNet)) + " IQD");
+                String currentBalanceText = "Current Balance: " +
+                    (!weOweParts.isEmpty() ? "We Owe: " + String.join(", ", weOweParts) : "") +
+                    (!weOweParts.isEmpty() && !owesUsParts.isEmpty() ? " " : "") +
+                    (!owesUsParts.isEmpty() ? "Owes Us: " + String.join(", ", owesUsParts) : "");
+                currentBalanceLabel.setText(currentBalanceText.isEmpty() ? "Current Balance: $0.00" : currentBalanceText);
+
+                double amount1 = amountField1.getText().isEmpty() ? 0 : Double.parseDouble(amountField1.getText());
+                double rate1 = exchangeRateField1.getText().isEmpty() ? 1.0 : Double.parseDouble(exchangeRateField1.getText());
+                String currency1 = currencyDropdown1.getValue();
+                double amount2 = amountField2.getText().isEmpty() ? 0 : Double.parseDouble(amountField2.getText());
+                double rate2 = exchangeRateField2.getText().isEmpty() ? 1.0 : Double.parseDouble(exchangeRateField2.getText());
+                String currency2 = currencyDropdown2.getValue();
+
+                double usdNew = usdNet;
+                double iqdNew = iqdNet;
+                if (currency1 != null && currency1.equals("USD")) usdNew += isCustomer ? -amount1 : amount1;
+                else if (currency1 != null && currency1.equals("IQD")) iqdNew += isCustomer ? -amount1 : amount1;
+                if (currency2 != null && currency2.equals("USD")) usdNew += isCustomer ? -amount2 : amount2;
+                else if (currency2 != null && currency2.equals("IQD")) iqdNew += isCustomer ? -amount2 : amount2;
+
+                List<String> newWeOweParts = new ArrayList<>();
+                List<String> newOwesUsParts = new ArrayList<>();
+                if (usdNew > 0) newOwesUsParts.add("$" + df.format(usdNew) + " USD");
+                else if (usdNew < 0) newWeOweParts.add("$" + df.format(Math.abs(usdNew)) + " USD");
+                if (iqdNew > 0) newOwesUsParts.add(df.format(iqdNew) + " IQD");
+                else if (iqdNew < 0) newWeOweParts.add(df.format(Math.abs(iqdNew)) + " IQD");
+                String newBalanceText = "New Balance: " +
+                    (!newWeOweParts.isEmpty() ? "We Owe: " + String.join(", ", newWeOweParts) : "") +
+                    (!newWeOweParts.isEmpty() && !newOwesUsParts.isEmpty() ? " " : "") +
+                    (!newOwesUsParts.isEmpty() ? "Owes Us: " + String.join(", ", newOwesUsParts) : "");
+                newBalanceLabel.setText(newBalanceText.isEmpty() ? "New Balance: $0.00" : newBalanceText);
+            } catch (NumberFormatException | DatabaseException e) {
+                currentBalanceLabel.setText("Current Balance: Invalid input or error");
+                newBalanceLabel.setText("New Balance: Invalid input or error");
+            }
+        };
+        contactField.textProperty().addListener((obs, old, newVal) -> updateBalance.run());
+        amountField1.textProperty().addListener((obs, old, newVal) -> updateBalance.run());
+        currencyDropdown1.valueProperty().addListener((obs, old, newVal) -> updateBalance.run());
+        exchangeRateField1.textProperty().addListener((obs, old, newVal) -> updateBalance.run());
+        amountField2.textProperty().addListener((obs, old, newVal) -> updateBalance.run());
+        currencyDropdown2.valueProperty().addListener((obs, old, newVal) -> updateBalance.run());
+        exchangeRateField2.textProperty().addListener((obs, old, newVal) -> updateBalance.run());
+
+        grid.add(new Label("Customer/Supplier:"), 0, 0);
+        grid.add(contactField, 1, 0);
+        grid.add(currentBalanceLabel, 0, 1, 2, 1);
+        grid.add(paymentIdLabel, 0, 2, 2, 1);
+        grid.add(new Label("Date:"), 0, 3);
+        grid.add(datePicker, 1, 3);
+        grid.add(new Label("First Payment Amount:"), 0, 4);
+        grid.add(amountField1, 1, 4);
+        grid.add(new Label("Currency:"), 0, 5);
+        grid.add(currencyDropdown1, 1, 5);
+        grid.add(exchangeRateLabel1, 0, 6);
+        grid.add(exchangeRateField1, 1, 6);
+        grid.add(new Label("Second Payment Amount:"), 0, 7);
+        grid.add(amountField2, 1, 7);
+        grid.add(new Label("Currency:"), 0, 8);
+        grid.add(currencyDropdown2, 1, 8);
+        grid.add(exchangeRateLabel2, 0, 9);
+        grid.add(exchangeRateField2, 1, 9);
+        grid.add(newBalanceLabel, 0, 10, 2, 1);
+
+        Button printButton = new Button("Print Receipt");
+        printButton.setOnAction(e -> {
+            String contactName = contactField.getText();
+            if (contactName != null && !contactName.trim().isEmpty()) {
+                String combinedAmount = amountField1.getText() + " " + currencyDropdown1.getValue() + 
+                    (amountField2.getText().isEmpty() ? "" : ", " + amountField2.getText() + " " + currencyDropdown2.getValue());
+                printReceipt(contactName, currentBalanceLabel.getText(), combinedAmount, 
+                    "", exchangeRateField1.getText() + ", " + exchangeRateField2.getText(), newBalanceLabel.getText(), 
+                    paymentIdLabel.getText(), datePicker.getValue().toString());
+            } else {
+                new Alert(Alert.AlertType.WARNING, "Please enter a customer/supplier name").showAndWait();
+            }
+        });
+
+        Button editButton = new Button("Edit Payment");
+        editButton.setOnAction(e -> {
+            String contactName = contactField.getText();
+            if (contactName != null && !contactName.trim().isEmpty()) {
+                try {
+                    int contactId = Integer.parseInt(contactName.split(" - ")[0]);
+                    boolean isCustomer = dbService.getCustomersWithNames().contains(contactName);
+                    editPayment(contactId, isCustomer, contactName);
+                } catch (DatabaseException ex) {
+                    LOGGER.error("Failed to edit payment", ex);
+                    new Alert(Alert.AlertType.ERROR, "Failed to edit payment: " + ex.getMessage()).showAndWait();
+                }
+            } else {
+                new Alert(Alert.AlertType.WARNING, "Please enter a customer/supplier name").showAndWait();
+            }
+        });
+
+        Button deleteButton = new Button("Delete Payment");
+        deleteButton.setOnAction(e -> {
+            String contactName = contactField.getText();
+            if (contactName != null && !contactName.trim().isEmpty()) {
+                try {
+                    int contactId = Integer.parseInt(contactName.split(" - ")[0]);
+                    boolean isCustomer = dbService.getCustomersWithNames().contains(contactName);
+                    deletePayment(contactId, isCustomer, contactName);
+                } catch (DatabaseException ex) {
+                    LOGGER.error("Failed to delete payment", ex);
+                    new Alert(Alert.AlertType.ERROR, "Failed to delete payment: " + ex.getMessage()).showAndWait();
+                }
+            } else {
+                new Alert(Alert.AlertType.WARNING, "Please enter a customer/supplier name").showAndWait();
+            }
+        });
+
+        Button searchButton = new Button("Search Payment");
+        searchButton.setOnAction(e -> {
+            String contactName = contactField.getText();
+            if (contactName != null && !contactName.trim().isEmpty()) {
+                try {
+                    int contactId = Integer.parseInt(contactName.split(" - ")[0]);
+                    boolean isCustomer = dbService.getCustomersWithNames().contains(contactName);
+                    searchPayments(contactId, isCustomer, contactName);
+                } catch (DatabaseException ex) {
+                    LOGGER.error("Failed to search payments", ex);
+                    new Alert(Alert.AlertType.ERROR, "Failed to search payments: " + ex.getMessage()).showAndWait();
+                }
+            } else {
+                new Alert(Alert.AlertType.WARNING, "Please enter a customer/supplier name").showAndWait();
+            }
+        });
+
+        Button saveButton = new Button("Save");
+        saveButton.setStyle("-fx-background-color: #4CAF50; -fx-text-fill: white;");
+        saveButton.setPrefSize(100, 40);
+        saveButton.setOnAction(e -> {
+            LOGGER.info("Save button clicked");
+            String contactName = contactField.getText();
+            if (contactName == null || contactName.trim().isEmpty()) {
+                new Alert(Alert.AlertType.WARNING, "Please enter a customer/supplier name").showAndWait();
+                return;
+            }
+            try {
+                int contactId = Integer.parseInt(contactName.split(" - ")[0]);
+                boolean isCustomer = dbService.getCustomersWithNames().contains(contactName);
+
+                if (amountField1.getText().isEmpty() || currencyDropdown1.getValue() == null) {
+                    LOGGER.warn("First payment amount and currency are required");
+                    new Alert(Alert.AlertType.ERROR, "First payment amount and currency are required").showAndWait();
+                    return;
+                }
+
+                double amount1 = Double.parseDouble(amountField1.getText().trim());
+                String currency1 = currencyDropdown1.getValue();
+                String date = datePicker.getValue().toString();
+                double exchangeRate1 = currency1.equals("USD") ? 1.0 : 
+                    Double.parseDouble(exchangeRateField1.getText().isEmpty() ? "1.0" : exchangeRateField1.getText());
+                String amount2Text = amountField2.getText().trim();
+                String currency2 = currencyDropdown2.getValue();
+                double exchangeRate2 = currency2 != null && !currency2.equals("USD") ? 
+                    Double.parseDouble(exchangeRateField2.getText().isEmpty() ? "1.0" : exchangeRateField2.getText()) : 1.0;
+
+                if (amount1 <= 0 || date.isEmpty() || exchangeRate1 <= 0 || 
+                    (!amount2Text.isEmpty() && exchangeRate2 <= 0)) {
+                    LOGGER.warn("Invalid payment data");
+                    new Alert(Alert.AlertType.ERROR, "Please fill all fields with valid data").showAndWait();
+                    return;
+                }
+
+                Integer customerId = isCustomer ? contactId : null;
+                Integer supplierId = !isCustomer ? contactId : null;
+                String status = customerId != null ? "RECEIVED" : "PAID";
+
+                int paymentId1 = dbService.markPaymentReceived(contactName, amount1, currency1, exchangeRate1, 
+                    customerId, supplierId, date, status);
+                auditService.logAction(currentUser, "payments", String.valueOf(paymentId1), 
+                    customerId != null ? "Payment received from customer: " + amount1 + " " + currency1 + " from " + contactName :
+                                         "Payment sent to supplier: " + amount1 + " " + currency1 + " to " + contactName,
+                    null, null);
+
+                int paymentId2 = 0;
+                if (!amount2Text.isEmpty() && currency2 != null) {
+                    double amount2 = Double.parseDouble(amount2Text);
+                    paymentId2 = dbService.markPaymentReceived(contactName, amount2, currency2, exchangeRate2, 
+                        customerId, supplierId, date, status);
+                    auditService.logAction(currentUser, "payments", String.valueOf(paymentId2), 
+                        customerId != null ? "Payment received from customer: " + amount2 + " " + currency2 + " from " + contactName :
+                                             "Payment sent to supplier: " + amount2 + " " + currency2 + " to " + contactName,
+                        null, null);
+                }
+
+                LOGGER.info("Payment saved for contact ID {}: {} {}", contactId, amount1, currency1);
+                paymentIdLabel.setText("Payment ID: " + paymentId1 + (paymentId2 != 0 ? ", " + paymentId2 : ""));
+                new Alert(Alert.AlertType.INFORMATION, 
+                    (isCustomer ? "Payment received: " : "Payment sent: ") + amount1 + " " + currency1 + 
+                    (paymentId2 != 0 ? ", " + amount2Text + " " + currency2 : "") +
+                    "\nPayment ID: " + paymentId1 + (paymentId2 != 0 ? ", " + paymentId2 : "") + 
+                    "\nDate: " + date).showAndWait();
+                refreshContactsPane(contactName);
+                updateBalance.run();
+            } catch (NumberFormatException ex) {
+                LOGGER.error("Invalid input: Amount1={}, Amount2={}, Exchange Rate1={}, Exchange Rate2={}", 
+                    amountField1.getText(), amountField2.getText(), exchangeRateField1.getText(), exchangeRateField2.getText(), ex);
+                new Alert(Alert.AlertType.ERROR, "Invalid numeric input").showAndWait();
+            } catch (DatabaseException ex) {
+                LOGGER.error("Failed to save payment: {}", ex.getMessage(), ex);
+                new Alert(Alert.AlertType.ERROR, "Failed to save payment: " + ex.getMessage()).showAndWait();
+            }
+        });
+
+        HBox buttonBox = new HBox(10, printButton, editButton, deleteButton, searchButton);
+        grid.add(buttonBox, 0, 11, 2, 1);
+        grid.add(saveButton, 1, 12);
+
+        Button newButton = new Button("New");
+        newButton.setOnAction(e -> {
+            LOGGER.info("New button clicked - resetting payment fields and contact");
+            contactField.clear();
+            amountField1.clear();
+            currencyDropdown1.setValue("USD");
+            exchangeRateField1.setText("1.0");
+            amountField2.clear();
+            currencyDropdown2.setValue("IQD");
+            exchangeRateField2.setText("1.0");
+            datePicker.setValue(LocalDate.now());
+            paymentIdLabel.setText("Payment ID: Auto-generated");
+            updateBalance.run();
+        });
+
+        ButtonType closeButtonType = new ButtonType("Close", ButtonBar.ButtonData.CANCEL_CLOSE);
+        paymentDialog.getDialogPane().getButtonTypes().add(closeButtonType);
+
+        HBox bottomButtonBox = new HBox(10, newButton);
+        bottomButtonBox.setAlignment(Pos.CENTER_RIGHT);
+        grid.add(bottomButtonBox, 0, 13, 2, 1); // Fixed typo: customButtonBox -> bottomButtonBox
+
+        paymentDialog.getDialogPane().setContent(grid);
+        paymentDialog.show();
+    }
+private void printReceipt(String contactName, String currentBalance, String amount, String currency, 
+                             String exchangeRate, String newBalance, String paymentIdText, String date) {
+        PrinterJob job = PrinterJob.createPrinterJob();
+        if (job != null && job.showPrintDialog(null)) {
+            VBox receipt = new VBox(10);
+            receipt.setPadding(new Insets(10));
+            receipt.getChildren().addAll(
+                new Label("Payment Receipt"),
+                new Label("Contact: " + contactName),
+                new Label(paymentIdText),
+                new Label("Date: " + date),
+                new Label(currentBalance),
+                new Label("Payment Amount: " + amount + " " + currency),
+                new Label("Exchange Rate (to USD): " + (currency.equals("USD") ? "1.0" : exchangeRate)),
+                new Label(newBalance)
+            );
+
+            boolean success = job.printPage(receipt);
+            if (success) {
+                job.endJob();
+                LOGGER.info("Receipt printed for {} (Payment #{})", contactName, paymentIdText.split(": ")[1]);
+            } else {
+                LOGGER.error("Failed to print receipt for {} (Payment #{})", contactName, paymentIdText.split(": ")[1]);
+                new Alert(Alert.AlertType.ERROR, "Failed to print receipt").showAndWait();
+            }
+        } else {
+            LOGGER.warn("Print job cancelled or no printer available");
+        }
+    }
+
+    private void editPayment(int contactId, boolean isCustomer, String contactName) {
+        TextInputDialog dialog = new TextInputDialog();
+        dialog.setTitle("Edit Payment");
+        dialog.setHeaderText("Enter Payment ID to Edit");
+        dialog.setContentText("Payment ID:");
+
+        Optional<String> result = dialog.showAndWait();
+        result.ifPresent(paymentId -> {
+            try {
+                Map<String, String> payment = dbService.getPaymentDetails(Integer.parseInt(paymentId));
+                if (payment == null) {
+                    new Alert(Alert.AlertType.ERROR, "Payment #" + paymentId + " not found").showAndWait();
+                    return;
+                }
+
+                Dialog<ButtonType> editDialog = new Dialog<>();
+                editDialog.setTitle("Edit Payment for " + contactName);
+                GridPane grid = new GridPane();
+                grid.setHgap(10);
+                grid.setVgap(10);
+
+                TextField amountField = new TextField(payment.get("amount"));
+                DatePicker datePicker = new DatePicker(LocalDate.parse(payment.get("date")));
+                ComboBox<String> currencyDropdown = new ComboBox<>();
+                currencyDropdown.getItems().addAll("USD", "IQD", "RMB");
+                currencyDropdown.setValue(payment.get("currency"));
+                ComboBox<String> statusDropdown = new ComboBox<>();
+                statusDropdown.getItems().addAll("PENDING", "COMPLETED");
+                statusDropdown.setValue(payment.get("status"));
+
+                grid.add(new Label("Amount:"), 0, 0);
+                grid.add(amountField, 1, 0);
+                grid.add(new Label("Date:"), 0, 1);
+                grid.add(datePicker, 1, 1);
+                grid.add(new Label("Currency:"), 0, 2);
+                grid.add(currencyDropdown, 1, 2);
+                grid.add(new Label("Status:"), 0, 3);
+                grid.add(statusDropdown, 1, 3);
+
+                editDialog.getDialogPane().setContent(grid);
+                editDialog.getDialogPane().getButtonTypes().addAll(ButtonType.OK, ButtonType.CANCEL);
+
+                Optional<ButtonType> editResult = editDialog.showAndWait();
+                if (editResult.isPresent() && editResult.get() == ButtonType.OK) {
+                    double newAmount = Double.parseDouble(amountField.getText());
+                    String newDate = datePicker.getValue().toString();
+                    String newCurrency = currencyDropdown.getValue();
+                    String newStatus = statusDropdown.getValue();
+                    dbService.updatePayment(Integer.parseInt(paymentId), newAmount, newDate, newCurrency, newStatus);
+                    auditService.logAction(currentUser, "payments", paymentId, 
+                        "Edited payment #" + paymentId + " for " + contactName, null, null);
+                    new Alert(Alert.AlertType.INFORMATION, "Payment #" + paymentId + " updated").showAndWait();
+                    refreshContactsPane(contactName);
+                }
+            } catch (DatabaseException e) {
+                ErrorHandler.handleException(e, "Failed to edit payment #" + paymentId, null);
+            }
+        });
+    }
+
+    private void deletePayment(int contactId, boolean isCustomer, String contactName) {
+        TextInputDialog dialog = new TextInputDialog();
+        dialog.setTitle("Delete Payment");
+        dialog.setHeaderText("Enter Payment ID to Delete");
+        dialog.setContentText("Payment ID:");
+
+        Optional<String> result = dialog.showAndWait();
+        result.ifPresent(paymentId -> {
+            try {
+                if (!dbService.paymentExists(Integer.parseInt(paymentId))) {
+                    new Alert(Alert.AlertType.ERROR, "Payment #" + paymentId + " not found").showAndWait();
+                    return;
+                }
+                Alert confirm = new Alert(Alert.AlertType.CONFIRMATION, "Delete payment #" + paymentId + "?", ButtonType.YES, ButtonType.NO);
+                if (confirm.showAndWait().orElse(ButtonType.NO) == ButtonType.YES) {
+                    dbService.deletePayment(Integer.parseInt(paymentId));
+                    auditService.logAction(currentUser, "payments", paymentId, 
+                        "Deleted payment #" + paymentId + " for " + contactName, null, null);
+                    new Alert(Alert.AlertType.INFORMATION, "Payment #" + paymentId + " deleted").showAndWait();
+                    refreshContactsPane(contactName);
+                }
+            } catch (DatabaseException e) {
+                ErrorHandler.handleException(e, "Failed to delete payment #" + paymentId, null);
+            }
+        });
+    }
+
+    private void searchPayments(int contactId, boolean isCustomer, String contactName) {
+        TextInputDialog dialog = new TextInputDialog();
+        dialog.setTitle("Search Payments");
+        dialog.setHeaderText("Enter Payment ID to Search (or leave blank for all)");
+        dialog.setContentText("Payment ID:");
+
+        Optional<String> result = dialog.showAndWait();
+        try {
+            List<Map<String, String>> payments;
+            if (result.isPresent() && !result.get().isEmpty()) {
+                String paymentId = result.get();
+                Map<String, String> payment = dbService.getPaymentDetails(Integer.parseInt(paymentId));
+                payments = payment != null ? Collections.singletonList(payment) : Collections.emptyList();
+            } else {
+                payments = isCustomer ? dbService.getCustomerPayments(contactId) : dbService.getSupplierPayments(contactId);
+            }
+
+            if (payments.isEmpty()) {
+                new Alert(Alert.AlertType.INFORMATION, "No payments found").showAndWait();
+                return;
+            }
+
+            VBox paymentList = new VBox(10);
+            for (Map<String, String> payment : payments) {
+                paymentList.getChildren().add(new Label("Payment #" + payment.get("paymentId") + ": " + 
+                    payment.get("amount") + " " + payment.get("currency") + ", Date: " + payment.get("date") + 
+                    ", Status: " + payment.get("status")));
+            }
+            ScrollPane scrollPane = new ScrollPane(paymentList);
+            scrollPane.setFitToWidth(true);
+
+            Alert paymentAlert = new Alert(Alert.AlertType.INFORMATION);
+            paymentAlert.setTitle("Payments for " + contactName);
+            paymentAlert.getDialogPane().setContent(scrollPane);
+            paymentAlert.showAndWait();
+        } catch (DatabaseException e) {
+            ErrorHandler.handleException(e, "Failed to search payments", null);
+        }
+    }
+
+    private void suggestContacts(TextField field, String input) throws DatabaseException {
+        ContextMenu suggestions = new ContextMenu();
+        if (input == null || input.trim().isEmpty()) {
+            suggestions.hide();
+            return;
+        }
+        try {
+            String lowerInput = input.toLowerCase();
+            List<String> customers = dbService.getCustomersWithNames();
+            List<String> suppliers = dbService.getSuppliersWithNames();
+            suggestions.getItems().clear();
+            for (String customer : customers) {
+                if (customer.toLowerCase().contains(lowerInput)) {
+                    MenuItem item = new MenuItem(customer);
+                    item.setOnAction(e -> {
+                        field.setText(customer);
+                        suggestions.hide();
+                        field.requestFocus();
+                    });
+                    suggestions.getItems().add(item);
+                }
+            }
+            for (String supplier : suppliers) {
+                if (supplier.toLowerCase().contains(lowerInput)) {
+                    MenuItem item = new MenuItem(supplier);
+                    item.setOnAction(e -> {
+                        field.setText(supplier);
+                        suggestions.hide();
+                        field.requestFocus();
+                    });
+                    suggestions.getItems().add(item);
+                }
+            }
+            if (!suggestions.getItems().isEmpty()) {
+                suggestions.show(field, javafx.geometry.Side.BOTTOM, 0, 0);
+            } else {
+                suggestions.hide();
+            }
+        } catch (DatabaseException e) {
+            throw e;
+        }
+    }
+
+    private void changeDatabase() {
+        DatabaseConfigDialog configDialog = new DatabaseConfigDialog((Stage) statusLabel.getScene().getWindow(), messages, dbService, this);
+        configDialog.showAndWait();
+        if (configDialog.isConfirmed()) {
+            new Alert(Alert.AlertType.INFORMATION, messages.getString("dbConfigUpdated")).showAndWait();
+        }
+    }
+
+    private void createNewDatabase() {
+        TextInputDialog dbNameDialog = new TextInputDialog();
+        dbNameDialog.setTitle("New Database");
+        dbNameDialog.setHeaderText(messages.getString("enterNewDbName"));
+        dbNameDialog.showAndWait().ifPresent(dbName -> {
+            CompletableFuture.runAsync(() -> {
+                try {
+                    showProgress(true);
+                    dbService.createNewDatabase(dbName);
+                    auditService.logAction(currentUser, "databases", null, "Created new database: " + dbName, null, null);
+                    javafx.application.Platform.runLater(() -> {
+                        new Alert(Alert.AlertType.INFORMATION, messages.getString("dbCreated") + ": " + dbName).showAndWait();
+                        changeDatabase();
+                    });
+                } catch (DatabaseException e) {
+                    ErrorHandler.handleException(e, messages.getString("errorCreatingDb") + ": " + dbName, null);
+                } finally {
+                    showProgress(false);
+                }
+            }, executor);
+        });
+    }
+
+    private void restrictAccessBasedOnRole(TabPane tabPane, String role) {
+        if ("user".equals(role)) {
+            tabPane.getTabs().get(8).setDisable(true); // Adjustments
+            tabPane.getTabs().get(9).setDisable(true); // Audit Trail
+        }
+    }
+
+    private void startScheduledTasks() {
+        scheduler = Executors.newScheduledThreadPool(SCHEDULER_POOL_SIZE);
+        scheduler.scheduleAtFixedRate(() -> {
+            try {
+                if (isDisposed.get()) return;
+                showProgress(true);
+                CompletableFuture.runAsync(() -> {
+                    try {
+                        List<String> overduePayments = dbService.getOverduePayments(1, 100);
+                        if (!overduePayments.isEmpty()) {
+                            StringBuilder message = new StringBuilder(messages.getString("overduePayments") + "\n");
+                            overduePayments.forEach(payment -> message.append(payment).append("\n"));
+                            javafx.application.Platform.runLater(() ->
+                                new Alert(Alert.AlertType.WARNING, message.toString(), ButtonType.OK).showAndWait());
+                        }
+
+                        dbService.processRecurringInvoices();
+
+                        List<String> reminders = dbService.getPendingReminders();
+                        if (!reminders.isEmpty()) {
+                            StringBuilder reminderMessage = new StringBuilder("Payment Reminders:\n");
+                            reminders.forEach(reminder -> {
+                                reminderMessage.append(reminder).append("\n");
+                                String invoiceId = reminder.split(",")[0].split(":")[1].trim();
+                                try {
+                                    dbService.markReminderSent(invoiceId);
+                                } catch (DatabaseException e) {
+                                    LOGGER.error("Failed to mark reminder sent for invoice: " + invoiceId, e);
+                                }
+                            });
+                            javafx.application.Platform.runLater(() ->
+                                new Alert(Alert.AlertType.INFORMATION, reminderMessage.toString(), ButtonType.OK).showAndWait());
+                        }
+
+                        exchangeRateService.updateExchangeRates();
+                    } catch (DatabaseException e) {
+                        LOGGER.error("Error in scheduled task", e);
+                    }
+                }, executor).exceptionally(throwable -> {
+                    LOGGER.error("Error in scheduled task", throwable);
+                    return null;
+                });
+            } finally {
+                showProgress(false);
+            }
+        }, 0, SCHEDULER_INTERVAL_MINUTES, TimeUnit.MINUTES);
+    }
+
+    private void showProgress(boolean show) {
+        javafx.application.Platform.runLater(() -> {
+            progressBar.setVisible(show);
+            statusLabel.setText(show ? messages.getString("statusProcessing") : messages.getString("statusReady"));
+        });
+    }
+
+    public void refreshContactsPane(String contactName) {
+        if (contactName != null && contactsPane != null) {
+            Platform.runLater(() -> {
+                contactsPane.searchContacts(contactName.split(" - ")[1]);
+                contactsPane.getContactList().getSelectionModel().select(contactName);
+                contactsPane.loadActivity();
+            });
+        }
+    }
+
+    public ContactsPane getContactsPane() {
+        return contactsPane;
+    }
+
+    @Override
+    public void stop() {
+        if (isDisposed.compareAndSet(false, true)) {
+            try {
+                if (scheduler != null && !scheduler.isShutdown()) scheduler.shutdownNow();
+                if (executor != null && !executor.isShutdown()) executor.shutdownNow();
+            } finally {
+                dbService.close();
+            }
+        }
+    }
+
+    public static void main(String[] args) {
+        launch(args);
+    }
+
+    static class DatabaseConfigDialog extends Dialog<Void> {
+        private static final String DEFAULT_DB_URL = "jdbc:h2:mem:testdb;DB_CLOSE_DELAY=-1;INIT=RUNSCRIPT FROM 'classpath:schema.sql'";
+        private static final String DEFAULT_USERNAME = "sa";
+        private TextField urlField, usernameField;
+        private PasswordField passwordField;
+        private boolean confirmed = false;
+        private ResourceBundle messages;
+        private DatabaseService dbService;
+        private FinancialManagementApp app;
+
+        public DatabaseConfigDialog(Stage owner, ResourceBundle messages, DatabaseService dbService, FinancialManagementApp app) {
+            super();
+            initOwner(owner);
+            setTitle(messages.getString("dbConfigTitle"));
+            this.messages = messages;
+            this.dbService = dbService;
+            this.app = app;
+            initializeUI();
+        }
+
+        private void initializeUI() {
+            GridPane grid = new GridPane();
+            grid.setHgap(10);
+            grid.setVgap(10);
+            grid.setPadding(new Insets(10));
+
+            grid.add(new Label(messages.getString("dbUrl")), 0, 0);
+            urlField = new TextField(DEFAULT_DB_URL);
+            grid.add(urlField, 1, 0);
+
+            grid.add(new Label(messages.getString("dbUsername")), 0, 1);
+            usernameField = new TextField(DEFAULT_USERNAME);
+            grid.add(usernameField, 1, 1);
+
+            grid.add(new Label(messages.getString("dbPassword")), 0, 2);
+            passwordField = new PasswordField();
+            grid.add(passwordField, 1, 2);
+
+            Button connectButton = new Button(messages.getString("connect"));
+            connectButton.setOnAction(e -> connect());
+            grid.add(connectButton, 0, 3, 2, 1);
+
+            getDialogPane().setContent(grid);
+            getDialogPane().getButtonTypes().addAll(ButtonType.CANCEL);
+        }
+
+        private void connect() {
+            String url = urlField.getText();
+            String username = usernameField.getText();
+            String password = passwordField.getText();
+            try {
+                if (url.isEmpty() || username.isEmpty()) {
+                    throw new IllegalArgumentException("URL and username are required");
+                }
+                HikariConfig config = new HikariConfig();
+                config.setJdbcUrl(url);
+                config.setUsername(username);
+                config.setPassword(password);
+                config.setDriverClassName("org.h2.Driver");
+                config.setMaximumPoolSize(10);
+                DatabaseService.dataSource = new HikariDataSource(config);
+                LOGGER.info("Database configured with URL: {}", url);
+                confirmed = true;
+
+                javafx.application.Platform.runLater(() -> {
+                    BorderPane root = (BorderPane) app.statusLabel.getScene().getRoot();
+                    TabPane newTabPane = app.createTabPane();
+                    root.setCenter(newTabPane);
+                });
+
+                close();
+            } catch (Exception e) {
+                LOGGER.error("Failed to configure database", e);
+                new Alert(Alert.AlertType.ERROR, "Invalid database configuration: " + e.getMessage()).showAndWait();
+            }
+        }
+
+        public boolean isConfirmed() {
+            return confirmed;
+        }
+    }
+}
